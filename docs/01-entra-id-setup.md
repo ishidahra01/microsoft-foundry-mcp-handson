@@ -1,6 +1,20 @@
 # Entra ID App Registration Setup Guide
 
-This guide walks through creating an Entra ID App Registration for use with Azure AI Foundry OAuth Identity Passthrough.
+This guide walks through creating an Entra ID App Registration for **OAuth Identity Passthrough** with Azure AI Foundry Agent.
+
+## Overview
+
+### What is OAuth Identity Passthrough?
+
+OAuth Identity Passthrough enables Azure AI Foundry Agent to:
+1. Prompt users for consent (first time)
+2. Obtain **user-delegated access tokens**
+3. Pass tokens to MCP servers via **Authorization headers**
+4. Call APIs (like Microsoft Graph) **on behalf of the authenticated user**
+
+This ensures that API calls are made with the user's identity and permissions, not the application's identity.
+
+📖 **Learn more**: [Architecture Overview - OAuth Identity Passthrough](./00-architecture-overview.md#oauth-identity-passthrough-patterns)
 
 ## Prerequisites
 
@@ -20,10 +34,12 @@ This guide walks through creating an Entra ID App Registration for use with Azur
 - **Name**: `Foundry-OAuth-MCP-Handson` (or your preferred name)
 - **Supported account types**: 
   - Select **Accounts in this organizational directory only (Single tenant)**
+  - For multi-tenant scenarios, choose appropriate option
 - **Redirect URI**: 
   - Select **Web**
   - Enter: `https://login.microsoftonline.com/common/oauth2/nativeclient`
-  - (This is a standard redirect URI for OAuth flows)
+  - **Note**: Foundry will provide its own redirect URI later; this is a placeholder
+  - You'll add Foundry's redirect URI in Step 7
 
 5. Click **Register**
 
@@ -33,6 +49,10 @@ After creation, you'll see the overview page. **Save these values**:
 
 - **Application (client) ID**: `12345678-1234-1234-1234-123456789012`
 - **Directory (tenant) ID**: `87654321-4321-4321-4321-210987654321`
+
+You'll need these for:
+- Foundry OAuth connection configuration
+- Token URL and authorization URL construction
 
 ## Step 3: Create Client Secret
 
@@ -44,8 +64,19 @@ After creation, you'll see the overview page. **Save these values**:
 6. **IMPORTANT**: Copy the secret **Value** immediately (not the Secret ID)
    - Format: `abc123def456...`
    - ⚠️ This value is only shown once!
+   - Store securely (e.g., Azure Key Vault for production)
 
 ## Step 4: Configure API Permissions
+
+### Understanding Delegated Permissions
+
+For **OAuth Identity Passthrough**, we use **Delegated permissions**:
+- User consents to the requested permissions
+- Token contains user's identity and permissions
+- API calls are made **on behalf of the user**
+- User must have the permission to perform the action
+
+This is different from **Application permissions** (app-only access).
 
 ### Add Microsoft Graph Permissions
 
@@ -54,17 +85,32 @@ After creation, you'll see the overview page. **Save these values**:
 3. Select **Microsoft Graph**
 4. Select **Delegated permissions**
 5. Search and add these permissions:
-   - **User.Read** - Read user profile
+   - **User.Read** - Read user profile information
    
 6. Click **Add permissions**
 
-### Grant Admin Consent (Optional but Recommended)
+### Understanding Permission Scopes
+
+- **User.Read**: Allows reading basic profile (name, email, job title)
+- Minimal scope for this hands-on
+- For production, add only required scopes:
+  - `Mail.Read` for reading emails
+  - `Calendars.Read` for reading calendar
+  - `Files.Read.All` for reading files
+  - etc.
+
+### Grant Admin Consent (Recommended)
 
 1. Click **Grant admin consent for [Your Organization]**
 2. Click **Yes** to confirm
-3. Status should change to **Granted**
+3. Status should change to **Granted** with green checkmark
 
-> If you don't grant admin consent, users will see a consent prompt on first use.
+**Why admin consent?**
+- Pre-approves permissions for all users in the organization
+- Users won't see consent prompt (unless you want them to)
+- Recommended for internal applications
+
+> If you don't grant admin consent, users will see a consent prompt on first use. This is fine for hands-on purposes.
 
 ## Step 5: Configure Authentication Settings
 
@@ -86,6 +132,81 @@ Authorization URL:      https://login.microsoftonline.com/<tenant-id>/oauth2/v2.
 Token URL:              https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token
 Scopes:                 https://graph.microsoft.com/.default
 ```
+
+### Understanding OAuth URLs
+
+**Authorization URL**: Where users are redirected for consent
+- Contains tenant ID for single-tenant apps
+- Use `/common/` for multi-tenant apps
+
+**Token URL**: Where Foundry exchanges authorization code for token
+- Must match tenant configuration
+- Returns access token and refresh token
+
+**Scopes**: Defines what permissions the token will have
+- `https://graph.microsoft.com/.default` = all delegated permissions granted to the app
+- Can specify individual scopes: `https://graph.microsoft.com/User.Read`
+
+## Step 7: Add Foundry Redirect URI (After Creating OAuth Connection)
+
+After you create the OAuth connection in Foundry (see [Foundry Setup Guide](./03-foundry-setup.md)), Foundry will provide a redirect URI.
+
+1. Copy the redirect URI from Foundry OAuth connection
+2. Return to Entra ID App Registration
+3. Go to **Authentication**
+4. Under **Web** platform, click **+ Add URI**
+5. Paste the Foundry redirect URI
+6. Click **Save**
+
+**Typical Foundry redirect URI format**:
+```
+https://auth.azure.com/redirect
+```
+(The actual URI will be provided by Foundry)
+
+## OAuth Identity Passthrough: Pattern A vs Pattern B
+
+This hands-on implements **Pattern A** (Direct Graph API Access):
+
+### Pattern A: Direct Graph Access (Current)
+
+```
+Entra ID App Registration:
+- API Permissions: Microsoft Graph (Delegated)
+  - User.Read
+- Token audience: https://graph.microsoft.com
+```
+
+**Flow**:
+1. Foundry requests token with Graph API scopes
+2. User consents to Graph API permissions
+3. Token is issued for Graph API (audience = Graph)
+4. MCP server receives token via Authorization header
+5. MCP server calls Graph API directly with the token
+
+### Pattern B: OBO Flow (Future Enhancement)
+
+For production scenarios with clear security boundaries:
+
+```
+Entra ID App Registrations (2 apps):
+1. MCP Server API App:
+   - Expose API with scopes
+   - API Permissions: Microsoft Graph (Delegated)
+   
+2. OAuth Client App:
+   - API Permissions: MCP Server API (Delegated)
+```
+
+**Flow**:
+1. Foundry requests token for MCP Server API
+2. User consents to MCP Server permissions
+3. Token is issued for MCP Server (audience = MCP API)
+4. MCP server validates incoming token
+5. MCP server uses OBO flow to get Graph token
+6. MCP server calls Graph API with exchanged token
+
+📖 **Learn more**: [Architecture Overview - OAuth Patterns](./00-architecture-overview.md#oauth-identity-passthrough-patterns)
 
 ## Security Best Practices
 
