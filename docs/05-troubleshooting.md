@@ -4,14 +4,234 @@ This guide provides solutions to common issues you might encounter when setting 
 
 ## Table of Contents
 
-1. [General Issues](#general-issues)
-2. [Azure Functions MCP Server](#azure-functions-mcp-server)
-3. [Azure API Management](#azure-api-management)
-4. [Entra ID & OAuth](#entra-id--oauth)
-5. [Azure AI Foundry](#azure-ai-foundry)
-6. [Web App](#web-app)
-7. [End-to-End Flow](#end-to-end-flow)
-8. [Performance Issues](#performance-issues)
+1. [OAuth Identity Passthrough Issues](#oauth-identity-passthrough-issues)
+2. [Authorization Header Issues](#authorization-header-issues)
+3. [General Issues](#general-issues)
+4. [Azure Functions MCP Server](#azure-functions-mcp-server)
+5. [Azure API Management](#azure-api-management)
+6. [Entra ID & OAuth](#entra-id--oauth)
+7. [Azure AI Foundry](#azure-ai-foundry)
+8. [Web App](#web-app)
+9. [End-to-End Flow](#end-to-end-flow)
+10. [Performance Issues](#performance-issues)
+
+---
+
+## OAuth Identity Passthrough Issues
+
+### OAuth consent screen doesn't appear
+
+**Symptoms**: When using MCP tool for the first time, no consent prompt shows
+
+**Solutions**:
+1. **Verify Identity Passthrough is enabled**:
+   - Go to Foundry OAuth connection settings
+   - Check "Enable OAuth Identity Passthrough" is ON
+   - If it's OFF, enable it and save
+
+2. **Check Entra ID redirect URI**:
+   - Get redirect URI from Foundry OAuth connection
+   - Verify it's added to Entra ID app registration
+   - URI must match exactly (case-sensitive)
+
+3. **Try incognito/private browser**:
+   - Clear all cookies and cache
+   - Use private/incognito window
+   - Sometimes cached tokens prevent consent flow
+
+4. **Verify OAuth connection is attached**:
+   - Go to Foundry MCP tool configuration
+   - Ensure OAuth connection is selected
+   - Save and test again
+
+📖 **Reference**: [Foundry Setup - OAuth Configuration](./03-foundry-setup.md#step-1-create-oauth-connection)
+
+### "AADSTS50105: Your administrator has configured the application to block users"
+
+**Symptoms**: Consent screen shows this error
+
+**Solutions**:
+1. **Grant admin consent**:
+   - Go to Entra ID app registration
+   - API permissions → Grant admin consent
+   - Users in your org won't need individual consent
+
+2. **Add user to app assignment** (if configured):
+   - Go to Enterprise Applications
+   - Find your app
+   - Users and groups → Add user
+
+3. **Check Conditional Access policies**:
+   - Verify no CA policies blocking the app
+   - Exempt the app if necessary
+
+📖 **Reference**: [Entra ID Setup - Admin Consent](./01-entra-id-setup.md#grant-admin-consent-recommended)
+
+### Each user gets separate consent prompt (expected behavior)
+
+**Symptoms**: Every user must consent individually
+
+**This is expected behavior with Identity Passthrough!**
+
+**Why**: Each user gets their own delegated token. First-time use requires consent.
+
+**To skip consent for all users**:
+1. Grant admin consent in Entra ID
+2. This pre-approves for all users in the organization
+3. Users won't see consent screen
+
+📖 **Reference**: [Architecture Overview - OAuth Flow](./00-architecture-overview.md#authentication-flow)
+
+---
+
+## Authorization Header Issues
+
+### "Missing Authorization header" Error from MCP Server
+
+**Symptoms**: MCP tool returns: `{"error": "Missing Authorization header"}`
+
+**Root causes**:
+1. APIM not forwarding Authorization header
+2. OAuth connection not attached to tool
+3. Identity Passthrough not enabled
+4. Token not being passed by Foundry
+
+**Solutions**:
+
+**1. Check APIM policy**:
+```bash
+# Verify APIM policy includes Authorization header forwarding
+```
+
+Go to APIM → APIs → MCP Server API → All operations → Inbound processing
+
+Should contain:
+```xml
+<set-header name="Authorization" exists-action="override">
+    <value>@(context.Request.Headers.GetValueOrDefault("Authorization",""))</value>
+</set-header>
+```
+
+**2. Verify OAuth connection**:
+- Go to Foundry MCP tool configuration
+- Authentication field must show OAuth connection name
+- If empty, select `graph-oauth-passthrough`
+- Save the tool
+
+**3. Test APIM forwarding directly**:
+```bash
+# Test that APIM forwards Authorization header
+curl -X POST https://apim-foundry-mcp-handson.azure-api.net/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test_token_12345" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"whoami","arguments":{}}}'
+
+# Expected: NOT "Missing Authorization header"
+# Expected: Error about invalid token (token is fake, but header was received)
+```
+
+**4. Check Function logs**:
+```bash
+az webapp log tail \
+  --name func-mcp-server-123456 \
+  --resource-group rg-foundry-mcp
+```
+
+Look for:
+- ✅ "Token status: present" = Authorization header received
+- ❌ "Missing Authorization header" = Header not forwarded by APIM
+
+📖 **Reference**: [APIM Setup - Authorization Header Forwarding](./02-apim-setup.md#step-3-configure-policies-for-authorization-header-forwarding)
+
+### Token in arguments instead of header
+
+**Symptoms**: Tool call includes `access_token` in arguments field
+
+**This is the OLD PATTERN and should NOT be used!**
+
+**Problem**:
+- Exposes tokens in Foundry traces
+- Violates MCP design principles
+- Token visible in Tool Approval UI
+
+**Solution**:
+Update MCP tool configuration:
+
+**❌ Wrong (old pattern)**:
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "whoami",
+    "arguments": {
+      "access_token": "eyJ0eXAiOi..."
+    }
+  }
+}
+```
+
+**✅ Correct (new pattern)**:
+```json
+HTTP Headers:
+Authorization: Bearer eyJ0eXAiOi...
+
+Body:
+{
+  "method": "tools/call",
+  "params": {
+    "name": "whoami",
+    "arguments": {}
+  }
+}
+```
+
+**How to fix**:
+1. Remove `access_token` from tool arguments
+2. Attach OAuth connection to tool (enables auto-header)
+3. Ensure Identity Passthrough is enabled on connection
+
+📖 **Reference**: [README - Authorization Header vs Arguments](../README.md#authorization-header-vs-arguments)
+
+### APIM strips Authorization header
+
+**Symptoms**: Functions logs show no token, but Foundry is sending it
+
+**Solutions**:
+
+**1. Verify APIM policy order**:
+The `set-header` policy must be in **inbound** section:
+```xml
+<policies>
+    <inbound>
+        <base />
+        <set-header name="Authorization" exists-action="override">
+            <value>@(context.Request.Headers.GetValueOrDefault("Authorization",""))</value>
+        </set-header>
+    </inbound>
+    ...
+</policies>
+```
+
+**2. Check for conflicting policies**:
+- Remove any `<authentication-managed-identity>` policies
+- Remove any policies that might override Authorization header
+- Check parent-level policies (Product, Global)
+
+**3. Enable APIM trace**:
+```bash
+# Enable trace in APIM
+# Check request/response headers in trace
+```
+
+**4. Test with subscription key**:
+If APIM requires subscription, provide it:
+```bash
+curl -H "Ocp-Apim-Subscription-Key: <key>" \
+  -H "Authorization: Bearer test" \
+  ...
+```
+
+📖 **Reference**: [APIM Setup - Troubleshooting](./02-apim-setup.md#troubleshooting)
 
 ---
 
