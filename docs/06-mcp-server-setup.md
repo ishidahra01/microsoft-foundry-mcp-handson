@@ -105,19 +105,12 @@ pip install -r requirements.txt
 
 ### 3. Configure Local Settings
 
-```bash
-# Copy template
-cp local.settings.json.template local.settings.json
-```
-
 Edit `local.settings.json`:
 ```json
 {
   "IsEncrypted": false,
   "Values": {
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "FUNCTIONS_WORKER_RUNTIME": "python",
-    "FUNCTIONS_CUSTOMHANDLER_PORT": "8080"
+    "FUNCTIONS_WORKER_RUNTIME": "custom"
   }
 }
 ```
@@ -143,12 +136,6 @@ MCP server listening on port 8080
 ```
 
 ### 5. Test Local Server
-
-#### Health Check
-```bash
-# Basic connectivity test
-curl http://localhost:7071/api/health
-```
 
 #### Test with Mock Token
 ```bash
@@ -327,19 +314,21 @@ def call_graph_api(access_token: str, endpoint: str = "me") -> Dict[str, Any]:
 
 ```json
 {
-  "version": "2.0",
-  "logging": {
-    "applicationInsights": {
-      "samplingSettings": {
-        "isEnabled": true,
-        "maxTelemetryItemsPerSecond": 20
-      }
+    "version": "2.0",
+    "extensions": {
+        "http": {
+            "routePrefix": ""
+        }
+    },
+    "customHandler": {
+        "description": {
+            "defaultExecutablePath": "python",
+            "workingDirectory": "",
+            "arguments": ["function_app.py"]
+        },
+        "enableForwardingHttpRequest": true,
+        "enableHttpProxyingRequest": true
     }
-  },
-  "extensionBundle": {
-    "id": "Microsoft.Azure.Functions.ExtensionBundle",
-    "version": "[4.*, 5.0.0)"
-  }
 }
 ```
 

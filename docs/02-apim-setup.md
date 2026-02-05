@@ -77,17 +77,8 @@ Once APIM is created:
 2. Click **+ Add API**
 3. Select **Function App**
 4. Click **Browse** to select your Functions app
-5. Select your Function App: `func-mcp-server`
-6. Select the functions to import:
-   - ✅ `mcp/whoami`
-   - ✅ `mcp/tools`
-   - ✅ `mcp/health`
-7. Configure API:
-   - **Display name**: `MCP Server API`
-   - **Name**: `mcp-server-api`
-   - **API URL suffix**: `mcp`
-   - **Products**: Select `Unlimited` (for hands-on)
-8. Click **Create**
+5. Select your Function App(MCP hosting): `e.g. func-mcp-server-xxx`
+6. Configure API: Default for hands-on
 
 ### Method B: Manual Configuration
 
@@ -98,7 +89,7 @@ If auto-import doesn't work:
 3. Configure:
    - **Display name**: `MCP Server API`
    - **Name**: `mcp-server-api`
-   - **Web service URL**: `https://<function-app-name>.azurewebsites.net/api`
+   - **Web service URL**: `https://<function-app-name>.azurewebsites.net`
    - **API URL suffix**: `mcp`
 4. Click **Create**
 5. Add operations manually:
@@ -150,53 +141,19 @@ The inbound policy ensures:
 <policies>
     <inbound>
         <base />
-        <!-- 
-            CRITICAL: Forward Authorization header for OAuth Identity Passthrough
-            This header contains the user-delegated access token from Foundry
-        -->
-        <set-header name="Authorization" exists-action="override">
-            <value>@(context.Request.Headers.GetValueOrDefault("Authorization",""))</value>
-        </set-header>
-        
-        <!-- Optional: Add correlation ID for request tracing -->
-        <set-header name="X-Correlation-ID" exists-action="override">
-            <value>@(Guid.NewGuid().ToString())</value>
-        </set-header>
-        
-        <!-- Optional: Add timestamp for debugging -->
-        <set-header name="X-Request-Time" exists-action="override">
-            <value>@(DateTime.UtcNow.ToString("o"))</value>
+        <set-variable name="authHeader" value="@(context.Request.Headers.GetValueOrDefault("Authorization",""))" />
+        <set-header name="x-functions-key" exists-action="override">
+            <value>{{REPLACE_YOUR_NAMED_VALUE_FUNC_NAME}}</value>
         </set-header>
     </inbound>
-    
     <backend>
         <base />
     </backend>
-    
     <outbound>
         <base />
-        <!-- Optional: Add CORS headers if calling from web apps -->
-        <cors>
-            <allowed-origins>
-                <origin>*</origin>
-            </allowed-origins>
-            <allowed-methods>
-                <method>GET</method>
-                <method>POST</method>
-                <method>OPTIONS</method>
-            </allowed-methods>
-            <allowed-headers>
-                <header>*</header>
-            </allowed-headers>
-            <expose-headers>
-                <header>*</header>
-            </expose-headers>
-        </cors>
     </outbound>
-    
     <on-error>
         <base />
-        <!-- Optional: Custom error handling -->
     </on-error>
 </policies>
 ```
@@ -212,24 +169,8 @@ The inbound policy ensures:
    - `exists-action="override"` replaces any existing value
    - Critical for token forwarding
 
-2. **`context.Request.Headers.GetValueOrDefault("Authorization","")`**
-   - Reads Authorization header from incoming request
-   - Returns empty string if header is missing (will cause error in MCP server)
-   - Preserves exact token value
-
-3. **`<base />`**
-   - Applies parent policy settings
-   - Important for policy inheritance
-
-### Verifying Policy Configuration
-
-After saving, verify the policy:
-
-1. Click on any operation (e.g., `/whoami`)
-2. In the **Inbound processing** section, you should see:
-   - "set-header: Authorization"
-   - "set-header: X-Correlation-ID"
-3. Policy should be visible in the code editor
+2. **`x-functions-key`**
+   - Optional header, this is the functions key for key-based authentication
 
 ### Testing Authorization Header Forwarding
 
@@ -271,24 +212,7 @@ For this hands-on, we're **intentionally not validating JWT** in APIM:
 
 Your APIM endpoints will be at:
 ```
-https://apim-foundry-mcp-handson.azure-api.net/mcp/whoami
-https://apim-foundry-mcp-handson.azure-api.net/mcp/tools
-https://apim-foundry-mcp-handson.azure-api.net/mcp/health
-```
-
-### Test Health Endpoint
-
-```bash
-curl https://apim-foundry-mcp-handson.azure-api.net/mcp/health
-```
-
-Expected response:
-```json
-{
-  "status": "healthy",
-  "service": "MCP Server",
-  "version": "1.0.0"
-}
+https://apim-foundry-mcp-handson.azure-api.net/mcp/
 ```
 
 ### Test with Authorization Header
