@@ -1,6 +1,21 @@
 # Azure API Management (APIM) Setup Guide
 
-This guide walks through setting up Azure API Management to import and expose the Azure Functions MCP Server.
+This guide walks through setting up Azure API Management to import and expose the self-hosted MCP Server with **Authorization header forwarding** for OAuth Identity Passthrough.
+
+## Overview
+
+### APIM's Role in OAuth Identity Passthrough
+
+APIM acts as a secure gateway between Azure AI Foundry Agent and the MCP Server:
+
+1. **Receives requests from Foundry** with `Authorization: Bearer <user-token>` header
+2. **Forwards the Authorization header** unchanged to the MCP server
+3. **Provides monitoring and logging** without exposing tokens
+4. **Enables policy-based security** (optional JWT validation, rate limiting)
+
+**Critical for this architecture**: APIM must **preserve and forward** the Authorization header so the MCP server can extract user tokens.
+
+📖 **Learn more**: [Architecture Overview](./00-architecture-overview.md#component-responsibilities)
 
 ## Prerequisites
 
@@ -101,9 +116,29 @@ If auto-import doesn't work:
 - **URL**: GET `/health`
 - **Display name**: `Health Check`
 
-## Step 3: Configure Policies
+## Step 3: Configure Policies for Authorization Header Forwarding
 
-For OAuth Identity Passthrough to work, we need to configure APIM to forward the Authorization header without modification.
+**This is the most critical step** for OAuth Identity Passthrough to work correctly.
+
+### Why Authorization Header Forwarding is Essential
+
+By default, APIM may:
+- Strip certain headers when forwarding requests
+- Modify or normalize header values
+- Add its own authentication headers
+
+For OAuth Identity Passthrough:
+- ✅ **Must preserve** the original Authorization header from Foundry
+- ✅ **Must forward** it unchanged to the MCP server
+- ✅ **Must not** replace or remove it
+
+### Understanding the Policy
+
+The inbound policy ensures:
+1. Authorization header from Foundry is captured
+2. Header is explicitly set on the backend request
+3. Header value is preserved exactly as received
+4. MCP server receives the user-delegated token
 
 ### Global Policy (All Operations)
 
@@ -115,21 +150,32 @@ For OAuth Identity Passthrough to work, we need to configure APIM to forward the
 <policies>
     <inbound>
         <base />
-        <!-- Forward Authorization header as-is -->
+        <!-- 
+            CRITICAL: Forward Authorization header for OAuth Identity Passthrough
+            This header contains the user-delegated access token from Foundry
+        -->
         <set-header name="Authorization" exists-action="override">
             <value>@(context.Request.Headers.GetValueOrDefault("Authorization",""))</value>
         </set-header>
-        <!-- Optional: Add correlation ID for tracking -->
+        
+        <!-- Optional: Add correlation ID for request tracing -->
         <set-header name="X-Correlation-ID" exists-action="override">
             <value>@(Guid.NewGuid().ToString())</value>
         </set-header>
+        
+        <!-- Optional: Add timestamp for debugging -->
+        <set-header name="X-Request-Time" exists-action="override">
+            <value>@(DateTime.UtcNow.ToString("o"))</value>
+        </set-header>
     </inbound>
+    
     <backend>
         <base />
     </backend>
+    
     <outbound>
         <base />
-        <!-- Optional: Add CORS headers if needed -->
+        <!-- Optional: Add CORS headers if calling from web apps -->
         <cors>
             <allowed-origins>
                 <origin>*</origin>
@@ -142,24 +188,82 @@ For OAuth Identity Passthrough to work, we need to configure APIM to forward the
             <allowed-headers>
                 <header>*</header>
             </allowed-headers>
+            <expose-headers>
+                <header>*</header>
+            </expose-headers>
         </cors>
     </outbound>
+    
     <on-error>
         <base />
+        <!-- Optional: Custom error handling -->
     </on-error>
 </policies>
 ```
 
 4. Click **Save**
 
-### Why No validate-jwt?
+### Policy Explanation
 
-For this hands-on, we're **not validating JWT** in APIM:
+**Key Policy Elements**:
 
-- ✅ Simplifies setup
-- ✅ Faster to demonstrate OAuth Identity Passthrough
-- ✅ Validation is delegated to Foundry's OAuth flow
-- ⚠️ **Not recommended for production**
+1. **`<set-header name="Authorization" exists-action="override">`**
+   - Ensures Authorization header is present on backend request
+   - `exists-action="override"` replaces any existing value
+   - Critical for token forwarding
+
+2. **`context.Request.Headers.GetValueOrDefault("Authorization","")`**
+   - Reads Authorization header from incoming request
+   - Returns empty string if header is missing (will cause error in MCP server)
+   - Preserves exact token value
+
+3. **`<base />`**
+   - Applies parent policy settings
+   - Important for policy inheritance
+
+### Verifying Policy Configuration
+
+After saving, verify the policy:
+
+1. Click on any operation (e.g., `/whoami`)
+2. In the **Inbound processing** section, you should see:
+   - "set-header: Authorization"
+   - "set-header: X-Correlation-ID"
+3. Policy should be visible in the code editor
+
+### Testing Authorization Header Forwarding
+
+Test that APIM forwards the header correctly:
+
+```bash
+# Test with a dummy token
+curl -X POST https://apim-foundry-mcp-handson.azure-api.net/mcp/whoami \
+  -H "Authorization: Bearer test_token_12345" \
+  -H "Content-Type: application/json" \
+  -v
+
+# Look for these in the response:
+# - Error about invalid token (expected - token is fake)
+# - NOT "Missing Authorization header" (that means forwarding failed)
+```
+
+**Expected behavior**:
+- ❌ If you see "Missing Authorization header" → Policy is not forwarding correctly
+- ✅ If you see "Invalid token" or Graph API errors → Forwarding works! (Token is just invalid)
+
+### Why No validate-jwt in This Hands-on?
+
+For this hands-on, we're **intentionally not validating JWT** in APIM:
+
+**Reasons**:
+- ✅ Simplifies initial setup and learning
+- ✅ Faster to demonstrate OAuth Identity Passthrough flow
+- ✅ JWT validation delegated to Foundry's OAuth mechanism
+- ✅ Focus on understanding the token flow pattern
+
+**In hands-on mode**: Token validation happens at Microsoft Graph API
+
+**For production**: Add JWT validation (see Production section below)
 
 ## Step 4: Test APIM Endpoints
 
@@ -236,53 +340,155 @@ requests
 
 ## Architecture Overview
 
+After completing this setup, your architecture will be:
+
 ```
-Foundry Agent
-    ↓ [Authorization: Bearer <token>]
+Azure AI Foundry Agent
+    ↓ [Authorization: Bearer <user-token>]
+    ↓ [Token in header, NOT in arguments!]
 APIM Gateway (apim-foundry-mcp-handson.azure-api.net/mcp)
-    ↓ [Forward Authorization header]
-    ↓ [No JWT validation]
-Azure Functions (func-mcp-server.azurewebsites.net/api/mcp)
+    ↓ [Forward Authorization header unchanged]
+    ↓ [No JWT validation in hands-on mode]
+    ↓ [Add correlation ID for tracing]
+Azure Functions MCP Server (func-mcp-server.azurewebsites.net/mcp)
+    ↓ [Extract token from Authorization header]
     ↓ [Use token for Graph API]
 Microsoft Graph API
 ```
+
+**Key Points**:
+1. Token flows through APIM **in the Authorization header**
+2. APIM **does not modify or validate** the token (hands-on mode)
+3. MCP server **extracts token from header**, never from arguments
+4. This follows **MCP official design pattern** for authentication
 
 ## Security Notes for Hands-on
 
 ⚠️ **Current setup is for demonstration only**:
 
-- ❌ No JWT validation
+- ❌ No JWT signature validation
+- ❌ No token audience verification
 - ❌ No IP restrictions
-- ❌ No rate limiting (besides default)
+- ❌ No rate limiting (besides APIM defaults)
 - ❌ No private endpoints
+
+**Why this is acceptable for hands-on**:
+- Focus on learning OAuth Identity Passthrough flow
+- Simplified setup for demonstrations
+- Token validation happens at Graph API level
+- Foundry manages OAuth lifecycle
 
 ### Production Recommendations
 
-For production, add these policies:
+For production deployments, enhance APIM policies:
 
-1. **JWT Validation**:
+#### 1. JWT Validation
+
+Validate token signature and claims:
+
 ```xml
-<validate-jwt header-name="Authorization">
-    <openid-config url="https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid-configuration" />
-    <required-claims>
-        <claim name="aud">
-            <value>api://<your-api-app-id></value>
-        </claim>
-    </required-claims>
-</validate-jwt>
+<inbound>
+    <base />
+    <!-- Validate JWT signature and claims -->
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Unauthorized">
+        <openid-config url="https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid-configuration" />
+        <required-claims>
+            <!-- For Pattern A: Validate Graph API audience -->
+            <claim name="aud">
+                <value>https://graph.microsoft.com</value>
+            </claim>
+            <!-- For Pattern B: Validate MCP API audience -->
+            <!-- <claim name="aud"><value>api://your-mcp-api-id</value></claim> -->
+            
+            <!-- Verify required scopes -->
+            <claim name="scp" match="any">
+                <value>User.Read</value>
+            </claim>
+        </required-claims>
+    </validate-jwt>
+    
+    <!-- Then forward the validated token -->
+    <set-header name="Authorization" exists-action="override">
+        <value>@(context.Request.Headers.GetValueOrDefault("Authorization",""))</value>
+    </set-header>
+</inbound>
 ```
 
-2. **Rate Limiting**:
+**Benefits**:
+- Verifies token signature (prevents forgery)
+- Validates token audience (prevents token reuse)
+- Checks token hasn't expired
+- Ensures required scopes are present
+
+#### 2. Rate Limiting
+
+Prevent abuse and ensure fair usage:
+
 ```xml
-<rate-limit calls="100" renewal-period="60" />
+<inbound>
+    <base />
+    
+    <!-- Global rate limit -->
+    <rate-limit calls="100" renewal-period="60" />
+    
+    <!-- Per-user rate limit (based on token) -->
+    <rate-limit-by-key calls="20" renewal-period="60" 
+        counter-key="@(context.Request.Headers.GetValueOrDefault("Authorization","").AsJwt()?.Subject ?? "anonymous")" />
+    
+    <!-- Daily quota -->
+    <quota calls="10000" renewal-period="86400" />
+</inbound>
 ```
 
-3. **IP Restrictions**:
+#### 3. IP Restrictions
+
+Allow only trusted sources:
+
 ```xml
-<ip-filter action="allow">
-    <address>x.x.x.x</address>
-</ip-filter>
+<inbound>
+    <base />
+    
+    <!-- Restrict to specific IP ranges -->
+    <ip-filter action="allow">
+        <address>203.0.113.0/24</address>  <!-- Your corporate network -->
+        <address>198.51.100.0/24</address>  <!-- Your VPN -->
+    </ip-filter>
+</inbound>
 ```
+
+#### 4. Enhanced Logging (Without Exposing Tokens)
+
+Log requests safely:
+
+```xml
+<inbound>
+    <base />
+    
+    <!-- Log request details without token -->
+    <set-variable name="requestTime" value="@(DateTime.UtcNow)" />
+    <set-variable name="hasAuth" value="@(context.Request.Headers.ContainsKey("Authorization"))" />
+    
+    <trace source="apim-policy">
+        Request received: @(context.Request.Method) @(context.Request.Url.Path)
+        Has Authorization: @((bool)context.Variables["hasAuth"])
+        Correlation ID: @(context.Request.Headers.GetValueOrDefault("X-Correlation-ID",""))
+    </trace>
+</inbound>
+```
+
+#### 5. Circuit Breaker Pattern
+
+Protect backend from cascading failures:
+
+```xml
+<backend>
+    <retry condition="@(context.Response.StatusCode >= 500)" count="3" interval="1" first-fast-retry="true">
+        <base />
+    </retry>
+</backend>
+```
+
+📖 **For complete security model**: [Architecture Overview - Security Model](./00-architecture-overview.md#security-model)
 
 ## Troubleshooting
 
