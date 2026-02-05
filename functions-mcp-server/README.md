@@ -1,4 +1,30 @@
-# Azure Functions MCP Server
+# Azure Functions MCP Server (Legacy)
+
+> ⚠️ **Note**: This is the legacy MCP server implementation. For the current **Authorization Header + OAuth Identity Passthrough** implementation, see [functions-mcp-selfhosted](../functions-mcp-selfhosted/).
+
+## Overview
+
+This directory contains an earlier version of the MCP server implementation. The current hands-on uses the **self-hosted MCP server** in the `functions-mcp-selfhosted` directory.
+
+### Key Differences
+
+| Aspect | This (Legacy) | Current (Selfhosted) |
+|--------|---------------|----------------------|
+| **MCP Protocol** | Function endpoints | HTTP + JSON-RPC 2.0 |
+| **Architecture** | Separate HTTP endpoints | Unified MCP endpoint |
+| **Token Handling** | Per-function extraction | Standardized context extraction |
+| **Recommended** | No | ✅ Yes |
+
+### Migration Guide
+
+If you're using this legacy implementation, migrate to the current implementation:
+
+1. Review [functions-mcp-selfhosted README](../functions-mcp-selfhosted/README.md)
+2. Follow [MCP Server Setup Guide](../docs/06-mcp-server-setup.md)
+3. Update APIM to point to new `/mcp` endpoint
+4. Test with Foundry Agent
+
+## Legacy Documentation
 
 This is an Azure Functions-based MCP (Model Context Protocol) server that supports OAuth Identity Passthrough from Azure AI Foundry Agent.
 
