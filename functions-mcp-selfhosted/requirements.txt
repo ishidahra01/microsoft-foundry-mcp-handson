@@ -1,0 +1,5 @@
+azure-functions
+requests>=2.31.0
+httpx
+mcp[cli]
+requests

@@ -94,7 +94,7 @@ Demonstrate how to:
   - Streaming support (via CopilotKit)
 
 ### 2. Azure Functions MCP Server (functions-mcp-server/)
-- **Runtime**: Python 3.9+
+- **Runtime**: Python 3.12+
 - **Framework**: Azure Functions v4
 - **MCP Tools**:
   - `whoami` - Get current user info from Graph API
@@ -140,8 +140,8 @@ Component-specific documentation:
 ### Prerequisites
 
 - Azure subscription
-- Node.js 18+
-- Python 3.9+
+- Node.js 20+
+- Python 3.12+
 - Azure CLI
 - Azure Functions Core Tools
 
@@ -154,6 +154,33 @@ cd microsoft-foundry-mcp-handson
 
 ### 2. Deploy Azure Functions MCP Server
 
+#### Option A: Use the provided deployment script (hands-on, relaxed settings)
+
+```powershell
+cd functions-mcp-server
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Test locally (optional)
+func start
+
+# Deploy to Azure (storage/network settings are relaxed for hands-on)
+..\scripts\deploy-functions.ps1
+```
+
+This script will:
+- Create a resource group (default: `rg-ms-foundry-mcp`) if it does not exist
+- Create a Storage Account with standard settings (no network ACL `Deny`)
+- Create a Blob container `mcp-data`
+- Create a Function App with a unique name and publish the code
+
+> ⚠️ **Security note (hands-on only)**: The script does **not** lock down Storage Account network access. This is intentional for the hands-on to avoid 403 errors when Azure Functions creates required file shares. For production, tighten network rules and shared key access according to your governance.
+
+The script will print the generated Function App name (for example, `func-mcp-server-123456`). Use that name/URL in subsequent steps (APIM import, Foundry configuration, etc.).
+
+#### Option B: Manual deployment with Azure CLI
+
 ```bash
 cd functions-mcp-server
 
@@ -163,12 +190,32 @@ pip install -r requirements.txt
 # Test locally
 func start
 
+# Create resource group (once)
+az group create \
+  --name rg-foundry-mcp \
+  --location eastus
+
+# Create storage account for the Function App (once)
+az storage account create \
+  --name stmcpserver \
+  --resource-group rg-foundry-mcp \
+  --location eastus \
+  --sku Standard_LRS \
+  --kind StorageV2 \
+  --allow-shared-key-access true \
+
+# (Optional) Create a Blob container
+az storage container create \
+  --name mcp-data \
+  --account-name stmcpserver \
+  --auth-mode login
+
 # Deploy to Azure
 az functionapp create \
   --resource-group rg-foundry-mcp \
   --consumption-plan-location eastus \
   --runtime python \
-  --runtime-version 3.9 \
+  --runtime-version 3.11 \
   --functions-version 4 \
   --name func-mcp-server-unique \
   --storage-account stmcpserver
@@ -208,7 +255,7 @@ az webapp create \
   --resource-group rg-foundry-mcp \
   --plan asp-foundry-mcp \
   --name webapp-mcp-handson-unique \
-  --runtime "NODE:18-lts"
+  --runtime "NODE:20-lts"
 
 # Configure app settings
 az webapp config appsettings set \
@@ -462,7 +509,7 @@ See [LICENSE](./LICENSE) file.
 - **API**: Foundry Agent V2 を呼び出す `/api/copilot` エンドポイント
 
 ### 2. Azure Functions MCP Server (functions-mcp-server/)
-- **ランタイム**: Python 3.9+
+- **ランタイム**: Python 3.11+
 - **フレームワーク**: Azure Functions v4
 - **MCP ツール**: `whoami`、`tools`、`health`
 
