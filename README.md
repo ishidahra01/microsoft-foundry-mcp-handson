@@ -200,6 +200,7 @@ Demonstrate the **official MCP design pattern** for authentication:
 
 - **[Functions MCP Server README](./functions-mcp-selfhosted/README.md)**
 - **[Web App README](./webapp-copilotkit/README.md)**
+- **[Foundry AG-UI Server README](./foundry-agui-server/README.md)**
 
 ## 🚀 Quick Start
 
@@ -891,3 +892,5 @@ See [LICENSE](./LICENSE) file.
 ## 📄 ライセンス
 
 [LICENSE](./LICENSE) ファイルを参照してください。
+
+

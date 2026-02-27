@@ -1,0 +1,10 @@
+# Install with prerelease support (recommended for latest Agent Framework bits)
+# pip install --pre -r requirements.txt
+
+azure-ai-projects
+azure-identity
+python-dotenv
+fastapi
+uvicorn[standard]
+agent-framework-azure-ai
+agent-framework-ag-ui

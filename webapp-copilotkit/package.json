@@ -9,9 +9,11 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@ag-ui/client": "^0.0.45",
     "@copilotkit/react-core": "^1.0.0",
     "@copilotkit/react-ui": "^1.0.0",
     "@copilotkit/react-textarea": "^1.0.0",
+    "@copilotkitnext/runtime": "^1.52.0",
     "@azure/identity": "^4.0.0",
     "next": "14.1.0",
     "react": "^18.2.0",
