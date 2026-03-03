@@ -5,6 +5,8 @@
  *
  * Features:
  *  - Real-time streaming chat with the Foundry Agent (SSE)
+ *  - MCP approval card when `require_approval=always` triggers
+ *    `mcp_approval_request`
  *  - OAuth consent card when the agent needs MCP delegated access
  *    (triggered by `oauth_consent_request` from Foundry)
  *  - After consent the user clicks "Continue" which calls /api/continue
@@ -16,6 +18,8 @@
  *   {"type":"tool.start",            "toolName":"...", "callId":"..."}
  *   {"type":"tool.end",              "toolName":"...", "callId":"..."}
  *   {"type":"tool.error",            "toolName":"...", "callId":"...", "error":"..."}
+ *   {"type":"mcp_approval_required", "approvalRequestId":"...",
+ *                                       "serverLabel":"...", "toolName":"..."}
  *   {"type":"oauth_consent_required","consentLink":"...",
  *                                    "responseId":"...", "connectionName":"..."}
  *   {"type":"done",                  "responseId":"..."}
@@ -51,6 +55,13 @@ interface ConsentInfo {
   consentLink: string;
   connectionName: string;
   conversationId: string;
+}
+
+interface ApprovalInfo {
+  approvalRequestId: string;
+  serverLabel: string;
+  toolName: string;
+  arguments: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +111,7 @@ export default function ChatPage() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [toolLogs, setToolLogs] = useState<ToolLog[]>([]);
+  const [approvalInfo, setApprovalInfo] = useState<ApprovalInfo | null>(null);
   const [consentInfo, setConsentInfo] = useState<ConsentInfo | null>(null);
 
   const [input, setInput] = useState("");
@@ -181,6 +193,25 @@ export default function ChatPage() {
             t.callId === callId ? { ...t, status: "error", error } : t
           )
         );
+      } else if (type === "mcp_approval_required") {
+        const { approvalRequestId, serverLabel, toolName, arguments: args } =
+          event as {
+            approvalRequestId: string;
+            serverLabel: string;
+            toolName: string;
+            arguments: string;
+          };
+
+        finishMessage("Waiting for MCP tool approval...");
+
+        setApprovalInfo({
+          approvalRequestId,
+          serverLabel,
+          toolName,
+          arguments: args ?? "{}",
+        });
+
+        return;
       } else if (type === "oauth_consent_required") {
         /**
          * The Foundry agent requires OAuth consent for an MCP connection.
@@ -199,9 +230,7 @@ export default function ChatPage() {
           connectionName: string;
         };
 
-        finishMessage(
-          (prev: string) => prev || "Waiting for OAuth consent..."
-        );
+        finishMessage("Waiting for OAuth consent...");
 
         setConsentInfo({
           consentLink,
@@ -231,6 +260,7 @@ export default function ChatPage() {
     if (!text || streaming) return;
 
     setInput("");
+    setApprovalInfo(null);
     setConsentInfo(null);
     setMessages((prev) => [
       ...prev,
@@ -277,16 +307,26 @@ export default function ChatPage() {
    * Reference:
    *   https://learn.microsoft.com/azure/ai-foundry/agents/how-to/mcp-authentication
    */
-  async function continueAfterConsent(): Promise<void> {
-    if (!consentInfo) return;
-    setConsentInfo(null);
+  async function continueConversation(options?: {
+    approve?: boolean;
+    approvalRequestIds?: string[];
+    clearConsent?: boolean;
+  }): Promise<void> {
+    if (!consentInfo && !approvalInfo) return;
+    if (options?.clearConsent) {
+      setConsentInfo(null);
+    }
     setStreaming(true);
 
     try {
       const res = await fetch("/api/continue", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId: conversationId.current }),
+        body: JSON.stringify({
+          conversationId: conversationId.current,
+          approve: options?.approve ?? true,
+          approvalRequestIds: options?.approvalRequestIds,
+        }),
       });
 
       if (!res.ok) {
@@ -308,6 +348,22 @@ export default function ChatPage() {
     } finally {
       setStreaming(false);
     }
+  }
+
+  async function approveMcpCall(approve: boolean): Promise<void> {
+    if (!approvalInfo) return;
+    const approvalRequestId = approvalInfo.approvalRequestId;
+    setApprovalInfo(null);
+
+    await continueConversation({
+      approve,
+      approvalRequestIds: [approvalRequestId],
+      clearConsent: false,
+    });
+  }
+
+  async function continueAfterConsent(): Promise<void> {
+    await continueConversation({ clearConsent: true });
   }
 
   // ── Open consent popup ────────────────────────────────────────────────────
@@ -400,6 +456,18 @@ export default function ChatPage() {
               </div>
             </div>
           ))}
+
+          {/* MCP Approval Card */}
+          {approvalInfo && (
+            <div className="flex justify-start">
+              <ApprovalCard
+                approvalInfo={approvalInfo}
+                onApprove={() => approveMcpCall(true)}
+                onReject={() => approveMcpCall(false)}
+                disabled={streaming}
+              />
+            </div>
+          )}
 
           {/* OAuth Consent Card */}
           {consentInfo && (
@@ -499,6 +567,71 @@ export default function ChatPage() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
+
+function ApprovalCard({
+  approvalInfo,
+  onApprove,
+  onReject,
+  disabled,
+}: {
+  approvalInfo: ApprovalInfo;
+  onApprove: () => void;
+  onReject: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="max-w-xl w-full rounded-2xl border border-blue-300 bg-blue-50 p-4 shadow-sm">
+      <div className="flex items-start gap-3">
+        <span className="text-2xl select-none" aria-hidden>
+          ✅
+        </span>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-semibold text-blue-900 text-sm">
+            MCP Tool Approval Required
+          </h3>
+
+          <p className="mt-1 text-xs text-blue-700">
+            Server: <span className="font-mono font-medium">{approvalInfo.serverLabel || "(unknown)"}</span>
+          </p>
+          <p className="mt-0.5 text-xs text-blue-700">
+            Tool: <span className="font-mono font-medium">{approvalInfo.toolName || "(unknown)"}</span>
+          </p>
+
+          <p className="mt-2 text-sm text-blue-800 leading-relaxed">
+            This MCP call requires explicit approval before it can run. Review
+            and choose whether to continue.
+          </p>
+
+          {approvalInfo.arguments && approvalInfo.arguments !== "{}" && (
+            <pre className="mt-2 max-h-32 overflow-auto rounded-lg border border-blue-200 bg-white p-2 text-xs text-blue-900">
+              {approvalInfo.arguments}
+            </pre>
+          )}
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              onClick={onApprove}
+              disabled={disabled}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white
+                         hover:bg-green-700 active:bg-green-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              ✅ Approve and Continue
+            </button>
+
+            <button
+              onClick={onReject}
+              disabled={disabled}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white
+                         hover:bg-red-700 active:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              ❌ Reject
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * OAuth consent card shown when the Foundry agent requires delegated access.

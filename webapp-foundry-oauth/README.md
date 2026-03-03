@@ -59,6 +59,40 @@ Frontend shows ConsentCard
         Agent resumes → tool executes → response streams to UI
 ```
 
+### MCP Approval + OAuth フロー（`require_approval=always`）
+
+```
+User sends message
+    │
+    ▼
+FastAPI → Foundry Responses API (stream)
+    │
+    │  output item: mcp_approval_request
+    ▼
+Frontend shows ApprovalCard
+    │
+    ├── [Approve and Continue] / [Reject]
+    │        │
+    │        ▼
+    │    POST /api/continue
+    │    body: {
+    │      conversationId,
+    │      approve,
+    │      approvalRequestIds
+    │    }
+    │
+    ▼
+FastAPI → Foundry Responses API
+    body: {
+      previous_response_id: "resp_xxx",
+      input: [{
+        type: "mcp_approval_response",
+        approve: true|false,
+        approval_request_id: "mcpr_xxx"
+      }]
+    }
+```
+
 ---
 
 ## ディレクトリ構成
@@ -171,6 +205,7 @@ npm run dev
 | `tool.start` | ツール呼び出し開始（`toolName`, `callId`） |
 | `tool.end` | ツール呼び出し完了（`toolName`, `callId`） |
 | `tool.error` | ツール呼び出しエラー（`toolName`, `callId`, `error`） |
+| `mcp_approval_required` | MCP 実行承認が必要（`approvalRequestId`, `serverLabel`, `toolName`, `arguments`） |
 | `oauth_consent_required` | OAuth 同意が必要（`consentLink`, `responseId`, `connectionName`） |
 | `done` | ストリーム完了（`responseId`） |
 | `error` | エラー（`message`） |
@@ -200,16 +235,19 @@ npm run dev
 
 ### `POST /api/continue`
 
-OAuth 同意後に会話を再開します。
+MCP 承認後または OAuth 同意後に会話を再開します。
 
 **Request body:**
 ```json
 {
-  "conversationId": "abc123"
+  "conversationId": "abc123",
+  "approve": true,
+  "approvalRequestIds": ["mcpr_xxx"]
 }
 ```
 
 バックエンドが保存している `previous_response_id` を使って Foundry Responses API を再呼び出しします。
+`pending_approvals` がある場合は `mcp_approval_response` を `input` に付与して再開します。
 （[参照: MCP server authentication](https://learn.microsoft.com/azure/ai-foundry/agents/how-to/mcp-authentication)）
 
 **Response:** `text/event-stream`（上記 SSE イベント）
