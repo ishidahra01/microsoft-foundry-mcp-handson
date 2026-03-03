@@ -1,8 +1,10 @@
-# CopilotKit × Foundry Agent (V2) × OAuth Identity Passthrough MCP - Hands-on
+# Foundry Agent (V2) × OAuth Identity Passthrough MCP - Hands-on
 
 [Japanese follows English / 日本語は英語の後にあります]
 
-This repository contains a complete hands-on implementation of a chat application using **CopilotKit UI** connected to **Azure AI Foundry Agent V2 API** with **OAuth Identity Passthrough** to a **self-hosted MCP Server** running on Azure Functions.
+This repository contains a complete hands-on implementation of a chat application (**webapp-foundry-oauth**) using a custom **Next.js + FastAPI UI** connected to **Azure AI Foundry Agent V2 API** with **OAuth Identity Passthrough** to a **self-hosted MCP Server** running on Azure Functions.
+
+> **Note**: The `webapp-copilotkit` and `foundry-agui-server` directories are kept for reference, but the official front-end application is **`webapp-foundry-oauth`**.
 
 ## 🎯 Purpose
 
@@ -16,8 +18,8 @@ Demonstrate the **official MCP design pattern** for authentication:
 
 ### What You'll Learn
 
-- Build a modern chat UI with CopilotKit
-- Connect to Azure AI Foundry Agent V2 API (Threads/Runs/Messages model)
+- Build a custom chat UI with Next.js + Tailwind CSS + SSE streaming
+- Connect to Azure AI Foundry Agent V2 API (Responses API with streaming)
 - Implement OAuth Identity Passthrough with proper header-based authentication
 - Create a self-hosted MCP server that extracts tokens from Authorization headers
 - Call Microsoft Graph API on behalf of authenticated users
@@ -32,14 +34,14 @@ Demonstrate the **official MCP design pattern** for authentication:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                          User's Browser                          │
-│                     (Web App / CopilotKit UI)                    │
+│               (webapp-foundry-oauth / Next.js UI)               │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
                                 │ Chat Messages
                                 ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                   Azure App Service (Node.js)                    │
-│                    CopilotKit Server (/api/copilot)              │
+│          Azure App Service (webapp-foundry-oauth)                │
+│   Easy Auth (Entra ID)  |  Next.js  |  FastAPI (/api/*)          │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
                                 │ Foundry Agent API (V2)
@@ -121,14 +123,17 @@ Demonstrate the **official MCP design pattern** for authentication:
 
 ## 📦 Components
 
-### 1. Web App (webapp-copilotkit/)
-- **Framework**: Next.js 14 with TypeScript
-- **UI**: CopilotKit for chat interface
-- **API**: `/api/copilot` endpoint that calls Foundry Agent V2
+### 1. Web App (webapp-foundry-oauth/) ⭐ Official Front-end
+- **Frontend**: Next.js 14 with TypeScript + Tailwind CSS
+- **Backend**: FastAPI (Python) with SSE streaming
+- **Authentication**: Easy Auth (Entra ID) for app-level access control
 - **Features**:
-  - Modern chat UI with streaming support
-  - Session management via Foundry Threads API
-  - No direct OAuth handling (delegated to Foundry)
+  - Chat UI with real-time SSE streaming
+  - OAuth Consent Card (Foundry OAuth Identity Passthrough)
+  - MCP Approval Card (tool execution consent)
+  - Tool execution log panel
+
+> `webapp-copilotkit/` and `foundry-agui-server/` are kept in the repository for reference but are not the primary deployment target.
 
 ### 2. Azure Functions MCP Server (functions-mcp-selfhosted/)
 - **Runtime**: Python 3.11+
@@ -150,8 +155,8 @@ Demonstrate the **official MCP design pattern** for authentication:
 ### 3. Azure Resources
 - **Azure AI Foundry**: Agent V2 with OAuth Identity Passthrough connection
 - **Azure API Management**: Gateway that forwards Authorization headers
-- **Azure App Service**: Hosts the Next.js web application
-- **Entra ID**: App registration for OAuth flows
+- **Azure App Service**: Hosts `webapp-foundry-oauth` (Next.js + FastAPI) with Easy Auth
+- **Entra ID**: App registrations for OAuth Identity Passthrough and Easy Auth
 
 ## 📚 Documentation
 
@@ -199,8 +204,9 @@ Demonstrate the **official MCP design pattern** for authentication:
 ### Component READMEs
 
 - **[Functions MCP Server README](./functions-mcp-selfhosted/README.md)**
-- **[Web App README](./webapp-copilotkit/README.md)**
-- **[Foundry AG-UI Server README](./foundry-agui-server/README.md)**
+- **[webapp-foundry-oauth README](./webapp-foundry-oauth/README.md)** ⭐ Official front-end
+- **[webapp-copilotkit README](./webapp-copilotkit/README.md)** (reference only)
+- **[Foundry AG-UI Server README](./foundry-agui-server/README.md)** (reference only)
 
 ## 🚀 Quick Start
 
@@ -310,67 +316,102 @@ Follow these guides in order:
    - MCP tool pointing to APIM
    - Agent V2 configuration
 
-### 4. Deploy Web App
+### 4. Deploy webapp-foundry-oauth
+
+📖 **Full guide**: [Deployment Guide](./docs/04-deployment-guide.md)
 
 ```bash
-cd webapp-copilotkit
-
-# Install dependencies
+# Build the Next.js frontend
+cd webapp-foundry-oauth/frontend
 npm install
-
-# Configure environment
-cp .env.local.template .env.local
-# Edit .env.local with your values
-
-# Test locally
-npm run dev
-# Open http://localhost:3000
-
-# Build for production
 npm run build
+cd ../..
 
-# Deploy to Azure App Service
+# Create App Service Plan + Web App (Node.js 20 Linux)
+az appservice plan create \
+  --name asp-foundry-mcp \
+  --resource-group rg-foundry-mcp \
+  --location eastus \
+  --sku B1 \
+  --is-linux
+
 az webapp create \
   --resource-group rg-foundry-mcp \
   --plan asp-foundry-mcp \
   --name webapp-mcp-handson-unique \
   --runtime "NODE:20-lts"
 
-# Configure app settings
+# Configure required app settings
 az webapp config appsettings set \
   --resource-group rg-foundry-mcp \
   --name webapp-mcp-handson-unique \
   --settings \
-    FOUNDRY_ENDPOINT="https://your-project.eastus.api.azureml.ms" \
-    FOUNDRY_API_KEY="your-api-key" \
-    FOUNDRY_AGENT_ID="your-agent-id" \
-    FOUNDRY_PROJECT_ID="your-project-id"
+    PROJECT_ENDPOINT="https://your-project.services.ai.azure.com/api/projects/your-project-id" \
+    AGENT_REFERENCE_NAME="your-agent-name" \
+    CORS_ORIGINS="https://webapp-mcp-handson-unique.azurewebsites.net" \
+    WEBSITES_PORT="8080" \
+    SCM_DO_BUILD_DURING_DEPLOYMENT="false"
+# WEBSITES_PORT=8080 tells App Service which port Next.js listens on.
+# App Service also sets the PORT env var to this value, which startup.sh passes
+# to `npm start` so Next.js binds to the correct port.
 
-# Deploy (ZIP deployment)
-npm run build
-zip -r app.zip .next package.json package-lock.json next.config.js
+# Deploy code (includes pre-built .next directory)
+zip -r webapp.zip \
+  webapp-foundry-oauth/startup.sh \
+  webapp-foundry-oauth/backend \
+  webapp-foundry-oauth/frontend/.next \
+  webapp-foundry-oauth/frontend/public \
+  webapp-foundry-oauth/frontend/package.json \
+  webapp-foundry-oauth/frontend/package-lock.json \
+  webapp-foundry-oauth/frontend/next.config.js
+
 az webapp deployment source config-zip \
   --resource-group rg-foundry-mcp \
   --name webapp-mcp-handson-unique \
-  --src app.zip
+  --src webapp.zip
+
+# Set startup command (runs both FastAPI backend + Next.js frontend)
+az webapp config set \
+  --resource-group rg-foundry-mcp \
+  --name webapp-mcp-handson-unique \
+  --startup-file "/bin/bash /home/site/wwwroot/startup.sh"
+```
+
+#### Enable Easy Auth (Entra ID login)
+
+```bash
+# After creating an Entra ID app registration for Easy Auth (see Deployment Guide)
+az webapp auth microsoft update \
+  --resource-group rg-foundry-mcp \
+  --name webapp-mcp-handson-unique \
+  --client-id <easy-auth-client-id> \
+  --client-secret <easy-auth-client-secret> \
+  --tenant-id <tenant-id> \
+  --yes
+
+az webapp auth update \
+  --resource-group rg-foundry-mcp \
+  --name webapp-mcp-handson-unique \
+  --enabled true \
+  --action LoginWithAzureActiveDirectory
 ```
 
 ### 5. Test End-to-End
 
 1. Access your web app: `https://webapp-mcp-handson-unique.azurewebsites.net`
-2. Type in the chat: **"Who am I?"**
-3. **First time**: OAuth consent screen appears
-   - Foundry initiates OAuth Identity Passthrough flow
-   - Sign in with your Microsoft account
-   - Grant `User.Read` permission
-   - Consent is saved for future requests
-4. **Behind the scenes**:
+2. **Easy Auth**: You are redirected to Microsoft login — sign in with your Entra ID account
+3. After login, the chat UI appears
+4. Type in the chat: **"Who am I?"**
+5. **First time**: OAuth consent card appears (Foundry OAuth Identity Passthrough)
+   - Click "Open Consent Page" → sign in and grant `User.Read` permission
+   - Click "I've Consented — Continue"
+6. **Behind the scenes**:
    - Foundry obtains your user-delegated access token
    - Agent calls MCP tool via APIM
    - Token is passed in `Authorization: Bearer <token>` header (NOT in arguments)
    - MCP server extracts token from header
    - MCP server calls Microsoft Graph API `/me`
-5. **Result**: Your user information is displayed in the chat!
+7. **Result**: Your user information is displayed in the chat!
 
 ### 6. Verify the Authorization Header Pattern
 
@@ -724,18 +765,20 @@ See [LICENSE](./LICENSE) file.
 
 ## 🙏 Acknowledgments
 
-- [CopilotKit](https://copilotkit.ai/) - Chat UI framework
 - [Azure AI Foundry](https://ai.azure.com) - Agent platform with OAuth Identity Passthrough
 - [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - Protocol specification
 - [FastMCP](https://github.com/modelcontextprotocol/python-sdk) - Python MCP implementation
+- [CopilotKit](https://copilotkit.ai/) - Chat UI framework (kept for reference in `webapp-copilotkit/`)
 
 ---
 
 ## 日本語 / Japanese
 
-# CopilotKit × Foundry Agent (V2) × OAuth Identity Passthrough MCP - ハンズオン
+# Foundry Agent (V2) × OAuth Identity Passthrough MCP - ハンズオン
 
-このリポジトリは、**CopilotKit UI** を使用したチャットアプリケーションを **Azure AI Foundry Agent V2 API** に接続し、**OAuth Identity Passthrough** を介して Azure Functions 上で動作する **セルフホスト型 MCP Server** を呼び出す完全なハンズオン実装です。
+このリポジトリは、**webapp-foundry-oauth**（Next.js + FastAPI）を使用したチャットアプリケーションを **Azure AI Foundry Agent V2 API** に接続し、**OAuth Identity Passthrough** を介して Azure Functions 上で動作する **セルフホスト型 MCP Server** を呼び出す完全なハンズオン実装です。
+
+> **注意**: `webapp-copilotkit` と `foundry-agui-server` はリポジトリに残していますが、正式なフロントアプリは **`webapp-foundry-oauth`** です。
 
 ## 🎯 目的
 
@@ -749,8 +792,8 @@ See [LICENSE](./LICENSE) file.
 
 ### 学習内容
 
-- CopilotKit を使用したモダンなチャット UI の構築
-- Azure AI Foundry Agent V2 API（Threads/Runs/Messages モデル）への接続
+- Next.js + Tailwind CSS + SSE ストリーミングによるカスタムチャット UI の構築
+- Azure AI Foundry Agent V2 API（Responses API / ストリーミング）への接続
 - 適切なヘッダーベース認証による OAuth Identity Passthrough の実装
 - Authorization ヘッダーからトークンを抽出するセルフホスト型 MCP サーバーの作成
 - 認証済みユーザーの代わりに Microsoft Graph API を呼び出す
@@ -785,10 +828,13 @@ See [LICENSE](./LICENSE) file.
 
 ## 📦 コンポーネント
 
-### 1. Web App (webapp-copilotkit/)
-- **フレームワーク**: TypeScript を使用した Next.js 14
-- **UI**: チャットインターフェース用の CopilotKit
-- **API**: Foundry Agent V2 を呼び出す `/api/copilot` エンドポイント
+### 1. Web App (webapp-foundry-oauth/) ⭐ 正式フロントアプリ
+- **フロントエンド**: TypeScript + Tailwind CSS を使用した Next.js 14
+- **バックエンド**: SSE ストリーミング付き FastAPI（Python）
+- **認証**: アプリレベルのアクセス制御に Easy Auth（Entra ID）
+- **機能**: リアルタイム SSE チャット、OAuth 同意カード、MCP 承認カード、ツールログパネル
+
+> `webapp-copilotkit/` と `foundry-agui-server/` は参照用としてリポジトリに残しています。
 
 ### 2. Azure Functions MCP Server (functions-mcp-selfhosted/)
 - **ランタイム**: Python 3.11+
@@ -802,8 +848,8 @@ See [LICENSE](./LICENSE) file.
 ### 3. Azure リソース
 - **Azure AI Foundry**: OAuth Identity Passthrough 接続を持つ Agent V2
 - **Azure API Management**: Authorization ヘッダーを転送するゲートウェイ
-- **Azure App Service**: Next.js Web アプリをホスト
-- **Entra ID**: OAuth フロー用のアプリ登録
+- **Azure App Service**: `webapp-foundry-oauth`（Next.js + FastAPI）を Easy Auth 付きでホスト
+- **Entra ID**: OAuth Identity Passthrough と Easy Auth 用のアプリ登録
 
 ## 📚 ドキュメント
 
@@ -826,7 +872,7 @@ See [LICENSE](./LICENSE) file.
 3. **[Entra ID アプリ登録](./docs/01-entra-id-setup.md)**
 4. **[APIM セットアップ](./docs/02-apim-setup.md)**
 5. **[Foundry セットアップ](./docs/03-foundry-setup.md)**
-6. **[デプロイメントガイド](./docs/04-deployment-guide.md)**
+6. **[デプロイメントガイド](./docs/04-deployment-guide.md)** — webapp-foundry-oauth の App Service デプロイ手順・Easy Auth 設定含む
 7. **[トラブルシューティングガイド](./docs/05-troubleshooting.md)**
 
 ## 🚀 クイックスタート
@@ -835,10 +881,11 @@ See [LICENSE](./LICENSE) file.
 
 1. MCP サーバーをデプロイ
 2. APIM をセットアップ
-3. Entra ID を構成
+3. Entra ID を構成（OAuth Identity Passthrough 用 + Easy Auth 用）
 4. Foundry をセットアップ
-5. Web アプリをデプロイ
-6. エンドツーエンドでテスト
+5. webapp-foundry-oauth を App Service にデプロイ（フロントエンド＋バックエンド）
+6. App Service で Easy Auth を有効化
+7. エンドツーエンドでテスト
 
 ## 🔑 重要な概念
 
@@ -857,7 +904,8 @@ See [LICENSE](./LICENSE) file.
 
 ## ✅ 受け入れ条件
 
-- [x] CopilotKit UI から Foundry Agent を実行できる
+- [x] webapp-foundry-oauth UI から Foundry Agent を実行できる
+- [x] Easy Auth（Entra ID）でアプリへのユーザーログイン機能が動作する
 - [x] OAuth Identity Passthrough によりユーザー同意が発生する
 - [x] MCP Server が Authorization ヘッダーからトークンを受け取れる
 - [x] トークンがツール引数に含まれない

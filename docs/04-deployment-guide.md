@@ -1,6 +1,8 @@
 # Deployment Guide
 
-This guide provides step-by-step instructions for deploying all components of the CopilotKit × Foundry Agent V2 × OAuth Identity Passthrough MCP hands-on project to Azure.
+This guide provides step-by-step instructions for deploying all components of the Foundry Agent V2 × OAuth Identity Passthrough MCP hands-on project to Azure.
+
+The official front-end application is **`webapp-foundry-oauth`** (Next.js + FastAPI). It is deployed as a **single Linux App Service** with Easy Auth (Entra ID) enabled so that only authenticated users can access the app. `webapp-copilotkit` and `foundry-agui-server` are kept in the repository for reference but are not the primary deployment target.
 
 ## Prerequisites
 
@@ -17,9 +19,11 @@ We'll deploy in this order:
 1. Resource Group
 2. Azure Functions MCP Server
 3. Azure API Management
-4. Entra ID App Registration (manual)
+4. Entra ID App Registration for OAuth Identity Passthrough (manual)
 5. Azure AI Foundry Configuration (manual)
-6. Azure App Service for Web App
+6. Deploy webapp-foundry-oauth to Azure App Service (frontend + backend)
+7. Enable Easy Auth on the App Service (Entra ID login)
+8. Enable Managed Identity for Foundry access
 
 ## Step 1: Set Environment Variables
 
@@ -37,16 +41,18 @@ export APIM_ORG="Your Organization"
 export APP_SERVICE_PLAN="asp-foundry-mcp"
 export WEB_APP="webapp-mcp-handson-$(date +%s)"
 
-# Entra ID (will be filled after manual creation)
+# Entra ID — OAuth Identity Passthrough app (created in Step 5)
 export TENANT_ID="your-tenant-id"
 export CLIENT_ID="your-client-id"
 export CLIENT_SECRET="your-client-secret"
 
 # Foundry (will be filled after manual configuration)
-export FOUNDRY_ENDPOINT="https://your-project.eastus.api.azureml.ms"
-export FOUNDRY_API_KEY="your-api-key"
-export FOUNDRY_AGENT_ID="your-agent-id"
-export FOUNDRY_PROJECT_ID="your-project-id"
+export PROJECT_ENDPOINT="https://your-project.services.ai.azure.com/api/projects/your-project-id"
+export AGENT_REFERENCE_NAME="your-agent-name"
+
+# Entra ID — Easy Auth app (created in Step 8; can reuse the same app registration or create a new one)
+export EASY_AUTH_CLIENT_ID="your-easy-auth-client-id"
+export EASY_AUTH_CLIENT_SECRET="your-easy-auth-client-secret"
 ```
 
 Load the environment:
@@ -259,9 +265,25 @@ Key steps:
 4. Copy Agent ID, Project ID, API Key
 5. Update your `deploy.env` file
 
-## Step 7: Deploy Web App
+## Step 7: Deploy webapp-foundry-oauth to App Service
 
-### Create App Service Plan
+`webapp-foundry-oauth` contains both a **Next.js frontend** and a **FastAPI backend**. The startup script (`startup.sh`) starts both processes inside a single Linux App Service.
+
+### 7-1. Build the Next.js Frontend Locally
+
+```bash
+cd webapp-foundry-oauth/frontend
+
+# Install dependencies
+npm install
+
+# Build for production
+npm run build
+
+cd ../..
+```
+
+### 7-2. Create App Service Plan
 
 ```bash
 az appservice plan create \
@@ -274,48 +296,51 @@ az appservice plan create \
 echo "✅ App Service Plan created: $APP_SERVICE_PLAN"
 ```
 
-### Create Web App
+### 7-3. Create Web App (Node.js Runtime)
 
 ```bash
 az webapp create \
   --resource-group $RESOURCE_GROUP \
   --plan $APP_SERVICE_PLAN \
   --name $WEB_APP \
-  --runtime "NODE:18-lts"
+  --runtime "NODE:20-lts"
 
 echo "✅ Web App created: $WEB_APP"
 ```
 
-### Configure App Settings
+### 7-4. Configure App Settings
 
 ```bash
 az webapp config appsettings set \
   --resource-group $RESOURCE_GROUP \
   --name $WEB_APP \
   --settings \
-    FOUNDRY_ENDPOINT="$FOUNDRY_ENDPOINT" \
-    FOUNDRY_API_KEY="$FOUNDRY_API_KEY" \
-    FOUNDRY_AGENT_ID="$FOUNDRY_AGENT_ID" \
-    FOUNDRY_PROJECT_ID="$FOUNDRY_PROJECT_ID"
+    PROJECT_ENDPOINT="$PROJECT_ENDPOINT" \
+    AGENT_REFERENCE_NAME="$AGENT_REFERENCE_NAME" \
+    CORS_ORIGINS="https://${WEB_APP}.azurewebsites.net" \
+    WEBSITES_PORT="8080" \
+    SCM_DO_BUILD_DURING_DEPLOYMENT="false"
 
 echo "✅ App settings configured"
 ```
 
-### Build and Deploy Web App
+> **Notes:**
+> - `WEBSITES_PORT=8080`: Tells App Service to route inbound traffic to the Next.js process on port 8080. App Service also sets the `PORT` environment variable to this same value, which the `startup.sh` script reads.
+> - `SCM_DO_BUILD_DURING_DEPLOYMENT=false`: Disables Oryx auto-build (npm install / npm build) during zip deployment, because the Next.js app is **pre-built locally** before creating the zip and the `.next` directory is included directly. This avoids a redundant build step on the server.
+> - `BACKEND_URL` is intentionally omitted because the startup script runs FastAPI on `localhost:8000`, which matches the default value already used by `next.config.js`.
+
+### 7-5. Deploy Code
 
 ```bash
-cd webapp-copilotkit
-
-# Install dependencies
-npm install
-
-# Build for production
-npm run build
-
-# Create deployment package
-zip -r ../webapp.zip .next package.json package-lock.json next.config.js public
-
-cd ..
+# Create deployment zip (include the pre-built .next directory)
+zip -r webapp.zip \
+  webapp-foundry-oauth/startup.sh \
+  webapp-foundry-oauth/backend \
+  webapp-foundry-oauth/frontend/.next \
+  webapp-foundry-oauth/frontend/public \
+  webapp-foundry-oauth/frontend/package.json \
+  webapp-foundry-oauth/frontend/package-lock.json \
+  webapp-foundry-oauth/frontend/next.config.js
 
 # Deploy
 az webapp deployment source config-zip \
@@ -323,46 +348,147 @@ az webapp deployment source config-zip \
   --name $WEB_APP \
   --src webapp.zip
 
-echo "✅ Web App deployed to: https://${WEB_APP}.azurewebsites.net"
+echo "✅ Code deployed"
 ```
 
-### Configure Startup Command
+### 7-6. Set Startup Command
 
 ```bash
 az webapp config set \
   --resource-group $RESOURCE_GROUP \
   --name $WEB_APP \
-  --startup-file "npm start"
+  --startup-file "/bin/bash /home/site/wwwroot/startup.sh"
 
 echo "✅ Startup command configured"
 ```
 
-## Step 8: Verify End-to-End Deployment
+### 7-7. Enable Managed Identity for Foundry Access
 
-### Test Web App
+The backend uses `DefaultAzureCredential` to call Azure AI Foundry.
+Assign a System-Assigned Managed Identity and grant it the **Azure AI User** role on the Foundry project.
 
 ```bash
-curl https://${WEB_APP}.azurewebsites.net/api/copilot
+# Enable System-Assigned Managed Identity
+az webapp identity assign \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP
 
-# Expected: {"status":"ok","message":"CopilotKit API endpoint for Foundry Agent V2"}
+# Retrieve the principal ID
+PRINCIPAL_ID=$(az webapp identity show \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP \
+  --query principalId \
+  --output tsv)
+
+# Get the Foundry project resource ID
+# Azure AI Foundry projects use the Microsoft.MachineLearningServices/workspaces provider.
+# Find your resource ID in Azure Portal: Foundry project → Properties → Resource ID.
+FOUNDRY_RESOURCE_ID="/subscriptions/<subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.MachineLearningServices/workspaces/<foundry-project>"
+
+# Assign Azure AI User role
+az role assignment create \
+  --assignee $PRINCIPAL_ID \
+  --role "Azure AI User" \
+  --scope $FOUNDRY_RESOURCE_ID
+
+echo "✅ Managed Identity configured"
 ```
 
-### Open in Browser
+## Step 8: Enable Easy Auth (Entra ID Login)
+
+Easy Auth adds a user-login layer in front of the App Service so that only authenticated Entra ID users can access the web app. This is separate from the OAuth Identity Passthrough used by Foundry for MCP tool calls.
+
+### 8-1. Create an Entra ID App Registration for Easy Auth
+
+> You can reuse the app registration created in Step 5, or create a new one dedicated to Easy Auth. A dedicated registration is recommended for clarity.
+
+1. Go to [Azure Portal](https://portal.azure.com) → **Entra ID** → **App registrations** → **+ New registration**
+2. **Name**: `webapp-foundry-oauth-easyauth` (or your preferred name)
+3. **Supported account types**: *Accounts in this organizational directory only*
+4. **Redirect URI**:
+   - Platform: **Web**
+   - URI: `https://${WEB_APP}.azurewebsites.net/.auth/login/aad/callback`
+     (Replace `${WEB_APP}` with your actual App Service name)
+5. Click **Register**
+
+After registration:
+- Copy **Application (client) ID** → set as `EASY_AUTH_CLIENT_ID` in `deploy.env`
+- Copy **Directory (tenant) ID** → already in `TENANT_ID`
+- Go to **Certificates & secrets** → create a client secret → set as `EASY_AUTH_CLIENT_SECRET` in `deploy.env`
+
+### 8-2. Enable Easy Auth via Azure CLI
+
+```bash
+# Configure the Microsoft identity provider
+az webapp auth microsoft update \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP \
+  --client-id $EASY_AUTH_CLIENT_ID \
+  --client-secret $EASY_AUTH_CLIENT_SECRET \
+  --tenant-id $TENANT_ID \
+  --yes
+
+# Enable authentication and require login
+az webapp auth update \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP \
+  --enabled true \
+  --action LoginWithAzureActiveDirectory
+
+echo "✅ Easy Auth enabled"
+```
+
+### 8-3. (Optional) Enable Easy Auth via Azure Portal
+
+If you prefer the portal wizard:
+
+1. Go to your App Service → **Settings** → **Authentication**
+2. Click **Add identity provider**
+3. Select **Microsoft**
+4. Choose *Provide the details of an existing app registration*
+5. Enter **App (client) ID** and **Client Secret**
+6. Set **Unauthenticated requests** to **HTTP 302 Redirect: Recommended for websites**
+7. Click **Add**
+
+## Step 9: Verify End-to-End Deployment
+
+### Test Web App
 
 ```bash
 echo "🌐 Open your web app:"
 echo "https://${WEB_APP}.azurewebsites.net"
 ```
 
-### Test OAuth Flow
+1. Open the URL — you should be redirected to Microsoft login (Easy Auth)
+2. Sign in with your Entra ID account
+3. After login, the chat UI appears
+4. Type: **"Who am I?"**
+5. The first time, an OAuth consent card appears (Foundry OAuth Identity Passthrough for Graph API)
+6. Grant permissions → the agent resumes → your user info is displayed
 
-1. Open the web app in browser
-2. Type: **"Who am I?"**
-3. First time: OAuth consent appears
-4. Grant permissions
-5. Verify your user info is displayed
+### Check App Service Logs
 
-## Step 9: Enable Monitoring (Optional but Recommended)
+```bash
+az webapp log tail \
+  --name $WEB_APP \
+  --resource-group $RESOURCE_GROUP
+```
+
+Look for:
+```
+[backend] Starting FastAPI on 127.0.0.1:8000 ...
+[frontend] Starting Next.js on port 8080 ...
+```
+
+### Verify Environment Variables
+
+```bash
+az webapp config appsettings list \
+  --name $WEB_APP \
+  --resource-group $RESOURCE_GROUP
+```
+
+## Step 10: Enable Monitoring (Optional but Recommended)
 
 ### Create Application Insights
 
@@ -403,9 +529,10 @@ After successful deployment:
 | Resource Group | `$RESOURCE_GROUP` |
 | Functions MCP | `https://${FUNCTION_APP}.azurewebsites.net` |
 | APIM Gateway | `https://${APIM_NAME}.azure-api.net` |
-| Web App | `https://${WEB_APP}.azurewebsites.net` |
-| Entra App | Client ID: `$CLIENT_ID` |
-| Foundry Agent | Agent ID: `$FOUNDRY_AGENT_ID` |
+| Web App (webapp-foundry-oauth) | `https://${WEB_APP}.azurewebsites.net` |
+| Entra App (OAuth Identity Passthrough) | Client ID: `$CLIENT_ID` |
+| Entra App (Easy Auth) | Client ID: `$EASY_AUTH_CLIENT_ID` |
+| Foundry Agent | Agent Reference: `$AGENT_REFERENCE_NAME` |
 
 ## Cleanup
 
@@ -420,7 +547,7 @@ az group delete \
 echo "🗑️ Resource group deletion initiated"
 ```
 
-> **Note**: Also manually delete the Entra ID App Registration
+> **Note**: Also manually delete both Entra ID App Registrations (OAuth Identity Passthrough and Easy Auth)
 
 ## Troubleshooting Deployment
 

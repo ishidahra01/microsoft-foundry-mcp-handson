@@ -33,14 +33,14 @@ This document provides a comprehensive overview of the MCP (Model Context Protoc
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                          User's Browser                          │
-│                    (Web App / CopilotKit UI)                    │
+│               (webapp-foundry-oauth / Next.js UI)               │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
                                 │ Chat Messages
                                 ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│               Azure App Service (Node.js Web App)                │
-│                    CopilotKit Server (/api/copilot)              │
+│          Azure App Service (webapp-foundry-oauth)                │
+│   Easy Auth (Entra ID login)  |  FastAPI backend (/api/*)        │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │
                                 │ Foundry Agent V2 API
@@ -157,11 +157,12 @@ Foundry Agent → [MCP Token] → MCP Server → [OBO Exchange] → Graph API
 
 ## Component Responsibilities
 
-### Web App (CopilotKit)
-- Provides chat UI for users
-- Calls Foundry Agent V2 API
-- Manages conversation threads and messages
-- No direct OAuth handling (delegated to Foundry)
+### Web App (webapp-foundry-oauth)
+- Provides chat UI for users (Next.js frontend)
+- FastAPI backend proxies Foundry Responses API SSE streams
+- Handles OAuth Consent Card and MCP Approval Card in the UI
+- **Easy Auth** (Entra ID) restricts access to authenticated users
+- No direct OAuth handling for MCP tools (delegated to Foundry OAuth Identity Passthrough)
 
 ### Azure AI Foundry Agent
 - Orchestrates AI agent behavior
