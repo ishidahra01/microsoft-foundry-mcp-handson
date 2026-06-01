@@ -2,11 +2,15 @@
 
 This guide provides step-by-step instructions for deploying all components of the Foundry Agent V2 × OAuth Identity Passthrough MCP hands-on project to Azure.
 
-The official front-end application is **`webapp-foundry-oauth`** (Next.js + FastAPI). It is deployed as a **single Linux App Service** with Easy Auth (Entra ID) enabled so that only authenticated users can access the app. `webapp-copilotkit` and `foundry-agui-server` are kept in the repository for reference but are not the primary deployment target.
+The official front-end application is **`webapp-foundry-oauth`** (Next.js + FastAPI). It is deployed as a **single Linux App Service** with Easy Auth (Entra ID) enabled so that only authenticated users can access the app. The Next.js UI is built as a static export and served by the FastAPI backend from the same Python App Service. `webapp-copilotkit` and `foundry-agui-server` are kept in the repository for reference but are not the primary deployment target.
+
+> **Important identity design**: The App Service backend must call Azure AI Foundry as the signed-in Easy Auth user, not as the App Service managed identity. Easy Auth must forward a user token to the backend, and each signed-in user must have a Foundry project role such as **Foundry User**. This keeps Foundry OAuth Identity Passthrough token caching aligned with the actual front-end user.
 
 ## Prerequisites
 
 - Azure subscription with Owner or Contributor role
+- Permission to create/update Entra ID App Registrations
+- Permission to grant admin consent for the Easy Auth app, or access to an Entra administrator who can grant it
 - Azure CLI installed and logged in (`az login`)
 - Azure Functions Core Tools v4 (`npm install -g azure-functions-core-tools@4`)
 - Node.js 18+ and npm
@@ -16,14 +20,15 @@ The official front-end application is **`webapp-foundry-oauth`** (Next.js + Fast
 ## Overview
 
 We'll deploy in this order:
+
 1. Resource Group
 2. Azure Functions MCP Server
 3. Azure API Management
 4. Entra ID App Registration for OAuth Identity Passthrough (manual)
 5. Azure AI Foundry Configuration (manual)
 6. Deploy webapp-foundry-oauth to Azure App Service (frontend + backend)
-7. Enable Easy Auth on the App Service (Entra ID login)
-8. Enable Managed Identity for Foundry access
+7. Enable Easy Auth on the App Service (Entra ID login + token store)
+8. Grant signed-in users access to the Foundry project
 
 ## Step 1: Set Environment Variables
 
@@ -49,13 +54,18 @@ export CLIENT_SECRET="your-client-secret"
 # Foundry (will be filled after manual configuration)
 export PROJECT_ENDPOINT="https://your-project.services.ai.azure.com/api/projects/your-project-id"
 export AGENT_REFERENCE_NAME="your-agent-name"
+export FOUNDRY_RESOURCE_ID="/subscriptions/<subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.CognitiveServices/accounts/<foundry-account>/projects/<foundry-project>"
 
 # Entra ID — Easy Auth app (created in Step 8; can reuse the same app registration or create a new one)
 export EASY_AUTH_CLIENT_ID="your-easy-auth-client-id"
 export EASY_AUTH_CLIENT_SECRET="your-easy-auth-client-secret"
+
+# Azure AI Foundry resource app used by Easy Auth to request a user-delegated Foundry token.
+export AZURE_AI_RESOURCE_APP_ID="18a66f5f-dbdf-4c17-9dd7-1634712a9cbe"
 ```
 
 Load the environment:
+
 ```bash
 source deploy.env
 ```
@@ -102,8 +112,10 @@ echo "✅ Function App created: $FUNCTION_APP"
 
 ### Deploy Function Code
 
+Use **`functions-mcp-selfhosted`** for the Foundry MCP tool endpoint. This implementation reads the user-delegated token from the HTTP `Authorization` header. Do not deploy `functions-mcp-server` for the OAuth Identity Passthrough path; that older implementation expects token arguments and will not match the Foundry authorization-header flow.
+
 ```bash
-cd functions-mcp-server
+cd functions-mcp-selfhosted
 
 # Install dependencies locally (for deployment package)
 pip install -r requirements.txt -t .python_packages/lib/site-packages
@@ -247,6 +259,7 @@ This step is manual. Follow the guide:
 **[Entra ID Setup Guide](./docs/01-entra-id-setup.md)**
 
 After creating the app registration:
+
 1. Copy the **Client ID**
 2. Copy the **Tenant ID**
 3. Copy the **Client Secret**
@@ -259,15 +272,16 @@ This step is manual. Follow the guide:
 **[Foundry Setup Guide](./docs/03-foundry-setup.md)**
 
 Key steps:
+
 1. Create OAuth Connection with Identity Passthrough
 2. Create MCP Tool pointing to APIM
 3. Create Agent V2 with the tool
-4. Copy Agent ID, Project ID, API Key
+4. Copy the Project endpoint and Agent reference name
 5. Update your `deploy.env` file
 
 ## Step 7: Deploy webapp-foundry-oauth to App Service
 
-`webapp-foundry-oauth` contains both a **Next.js frontend** and a **FastAPI backend**. The startup script (`startup.sh`) starts both processes inside a single Linux App Service.
+`webapp-foundry-oauth` contains a **Next.js frontend** and a **FastAPI backend**. For App Service deployment, the Next.js app is built as a static export (`frontend/out`) and the FastAPI backend serves both the static UI and `/api/*` endpoints from a single **Python Linux App Service**.
 
 ### 7-1. Build the Next.js Frontend Locally
 
@@ -279,6 +293,9 @@ npm install
 
 # Build for production
 npm run build
+
+# Confirm static export exists
+test -f out/index.html
 
 cd ../..
 ```
@@ -296,14 +313,14 @@ az appservice plan create \
 echo "✅ App Service Plan created: $APP_SERVICE_PLAN"
 ```
 
-### 7-3. Create Web App (Node.js Runtime)
+### 7-3. Create Web App (Python Runtime)
 
 ```bash
 az webapp create \
   --resource-group $RESOURCE_GROUP \
   --plan $APP_SERVICE_PLAN \
   --name $WEB_APP \
-  --runtime "NODE:20-lts"
+  --runtime "PYTHON:3.11"
 
 echo "✅ Web App created: $WEB_APP"
 ```
@@ -317,30 +334,36 @@ az webapp config appsettings set \
   --settings \
     PROJECT_ENDPOINT="$PROJECT_ENDPOINT" \
     AGENT_REFERENCE_NAME="$AGENT_REFERENCE_NAME" \
+    TENANT_ID="$TENANT_ID" \
+    EASY_AUTH_CLIENT_ID="$EASY_AUTH_CLIENT_ID" \
+    EASY_AUTH_CLIENT_SECRET="$EASY_AUTH_CLIENT_SECRET" \
+    REQUIRE_EASY_AUTH_USER_FOR_FOUNDRY="true" \
     CORS_ORIGINS="https://${WEB_APP}.azurewebsites.net" \
-    WEBSITES_PORT="8080" \
+    WEBSITES_PORT="8000" \
     SCM_DO_BUILD_DURING_DEPLOYMENT="false"
 
 echo "✅ App settings configured"
 ```
 
 > **Notes:**
-> - `WEBSITES_PORT=8080`: Tells App Service to route inbound traffic to the Next.js process on port 8080. App Service also sets the `PORT` environment variable to this same value, which the `startup.sh` script reads.
-> - `SCM_DO_BUILD_DURING_DEPLOYMENT=false`: Disables Oryx auto-build (npm install / npm build) during zip deployment, because the Next.js app is **pre-built locally** before creating the zip and the `.next` directory is included directly. This avoids a redundant build step on the server.
-> - `BACKEND_URL` is intentionally omitted because the startup script runs FastAPI on `localhost:8000`, which matches the default value already used by `next.config.js`.
+>
+> - `REQUIRE_EASY_AUTH_USER_FOR_FOUNDRY=true` prevents falling back to the App Service managed identity when Easy Auth does not forward a user token. This avoids cross-user OAuth token reuse in Foundry.
+> - `WEBSITES_PORT=8000`: The FastAPI process listens on the App Service Python container port.
+> - `SCM_DO_BUILD_DURING_DEPLOYMENT=false`: Disables Oryx auto-build because the frontend is pre-built locally and included as `frontend/out`.
+> - `BACKEND_URL` is not used in App Service because the static frontend and FastAPI backend are served from the same origin.
 
 ### 7-5. Deploy Code
 
 ```bash
-# Create deployment zip (include the pre-built .next directory)
-zip -r webapp.zip \
-  webapp-foundry-oauth/startup.sh \
-  webapp-foundry-oauth/backend \
-  webapp-foundry-oauth/frontend/.next \
-  webapp-foundry-oauth/frontend/public \
-  webapp-foundry-oauth/frontend/package.json \
-  webapp-foundry-oauth/frontend/package-lock.json \
-  webapp-foundry-oauth/frontend/next.config.js
+# Create deployment zip with files at the zip root.
+# The zip root must contain startup.sh, backend/, and frontend/out/.
+cd webapp-foundry-oauth
+zip -r ../webapp.zip \
+  startup.sh \
+  backend/server.py \
+  backend/requirements.txt \
+  frontend/out
+cd ..
 
 # Deploy
 az webapp deployment source config-zip \
@@ -362,41 +385,31 @@ az webapp config set \
 echo "✅ Startup command configured"
 ```
 
-### 7-7. Enable Managed Identity for Foundry Access
+### 7-7. Grant Foundry Access to Signed-In Users
 
-The backend uses `DefaultAzureCredential` to call Azure AI Foundry.
-Assign a System-Assigned Managed Identity and grant it the **Azure AI User** role on the Foundry project.
+The backend calls Azure AI Foundry with the signed-in Easy Auth user's delegated token. Therefore, every user who signs in to the App Service and chats with the agent needs access to the Foundry project.
 
 ```bash
-# Enable System-Assigned Managed Identity
-az webapp identity assign \
-  --resource-group $RESOURCE_GROUP \
-  --name $WEB_APP
-
-# Retrieve the principal ID
-PRINCIPAL_ID=$(az webapp identity show \
-  --resource-group $RESOURCE_GROUP \
-  --name $WEB_APP \
-  --query principalId \
+# Assign Foundry User to a signed-in user.
+USER_OBJECT_ID=$(az ad user show \
+  --id user@example.com \
+  --query id \
   --output tsv)
 
-# Get the Foundry project resource ID
-# Azure AI Foundry projects use the Microsoft.MachineLearningServices/workspaces provider.
-# Find your resource ID in Azure Portal: Foundry project → Properties → Resource ID.
-FOUNDRY_RESOURCE_ID="/subscriptions/<subscription-id>/resourceGroups/<foundry-rg>/providers/Microsoft.MachineLearningServices/workspaces/<foundry-project>"
-
-# Assign Azure AI User role
 az role assignment create \
-  --assignee $PRINCIPAL_ID \
-  --role "Azure AI User" \
+  --assignee-object-id $USER_OBJECT_ID \
+  --assignee-principal-type User \
+  --role "Foundry User" \
   --scope $FOUNDRY_RESOURCE_ID
 
-echo "✅ Managed Identity configured"
+echo "✅ Foundry project access granted to user"
 ```
+
+> If your tenant uses older role names, `Azure AI User` may appear instead of `Foundry User`. Use the role available in your tenant for Foundry project access.
 
 ## Step 8: Enable Easy Auth (Entra ID Login)
 
-Easy Auth adds a user-login layer in front of the App Service so that only authenticated Entra ID users can access the web app. This is separate from the OAuth Identity Passthrough used by Foundry for MCP tool calls.
+Easy Auth adds a user-login layer in front of the App Service so that only authenticated Entra ID users can access the web app. The backend also uses the Easy Auth user token to call Azure AI Foundry as that signed-in user. This user-scoped Foundry call is what keeps Foundry OAuth Identity Passthrough aligned with the front-end user.
 
 ### 8-1. Create an Entra ID App Registration for Easy Auth
 
@@ -412,30 +425,109 @@ Easy Auth adds a user-login layer in front of the App Service so that only authe
 5. Click **Register**
 
 After registration:
+
 - Copy **Application (client) ID** → set as `EASY_AUTH_CLIENT_ID` in `deploy.env`
 - Copy **Directory (tenant) ID** → already in `TENANT_ID`
 - Go to **Certificates & secrets** → create a client secret → set as `EASY_AUTH_CLIENT_SECRET` in `deploy.env`
 
+Additional required settings:
+
+1. Go to **Authentication** → **Implicit grant and hybrid flows**
+2. Enable **ID tokens**
+3. Go to **API permissions** and add a delegated permission for the Azure AI Foundry resource:
+
+   | Field | Value |
+  | ------ | ------ |
+   | Resource | `https://ai.azure.com` |
+   | Resource app ID | `18a66f5f-dbdf-4c17-9dd7-1634712a9cbe` |
+   | Delegated permission | `user_impersonation` |
+
+4. Grant admin consent for the tenant, or ask an Entra administrator to grant it.
+
+If the Azure AI resource does not appear in the portal's API permission picker, discover the scope ID and add it with Azure CLI:
+
+```bash
+AZURE_AI_SCOPE_ID=$(az ad sp show \
+  --id $AZURE_AI_RESOURCE_APP_ID \
+  --query "oauth2PermissionScopes[?value=='user_impersonation'] | [0].id" \
+  --output tsv)
+
+az ad app permission add \
+  --id $EASY_AUTH_CLIENT_ID \
+  --api $AZURE_AI_RESOURCE_APP_ID \
+  --api-permissions ${AZURE_AI_SCOPE_ID}=Scope
+
+# Requires an Entra administrator role, such as Global Administrator,
+# Privileged Role Administrator, or Cloud Application Administrator.
+az ad app permission admin-consent \
+  --id $EASY_AUTH_CLIENT_ID
+```
+
+> `az ad app permission admin-consent` requires Entra administrator privileges. Azure subscription Owner or Contributor is not sufficient.
+
 ### 8-2. Enable Easy Auth via Azure CLI
 
 ```bash
-# Configure the Microsoft identity provider
-az webapp auth microsoft update \
-  --resource-group $RESOURCE_GROUP \
-  --name $WEB_APP \
-  --client-id $EASY_AUTH_CLIENT_ID \
-  --client-secret $EASY_AUTH_CLIENT_SECRET \
-  --tenant-id $TENANT_ID \
-  --yes
-
-# Enable authentication and require login
-az webapp auth update \
+# Configure Easy Auth classic with the Microsoft identity provider.
+az webapp auth-classic update \
   --resource-group $RESOURCE_GROUP \
   --name $WEB_APP \
   --enabled true \
-  --action LoginWithAzureActiveDirectory
+  --action LoginWithAzureActiveDirectory \
+  --aad-client-id $EASY_AUTH_CLIENT_ID \
+  --aad-client-secret $EASY_AUTH_CLIENT_SECRET \
+  --aad-token-issuer-url "https://sts.windows.net/${TENANT_ID}/" \
+  --token-store true
+
+# Ask Easy Auth to acquire and store an Azure AI Foundry user token.
+# This makes x-ms-token-aad-access-token available to the FastAPI backend.
+SUBSCRIPTION_ID=$(az account show --query id --output tsv)
+AUTH_ID="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.Web/sites/${WEB_APP}/config/authsettings"
+
+az resource show \
+  --ids $AUTH_ID \
+  --api-version 2022-03-01 \
+  --output json > authsettings-current.json
+
+python - <<'PY'
+import json
+
+with open("authsettings-current.json", "r", encoding="utf-8") as f:
+    auth = json.load(f)
+
+auth.setdefault("properties", {})["additionalLoginParams"] = ["resource=https://ai.azure.com"]
+auth["properties"]["tokenStoreEnabled"] = True
+
+with open("authsettings-updated.json", "w", encoding="utf-8") as f:
+    json.dump(auth, f, indent=2)
+PY
+
+az rest \
+  --method PUT \
+  --uri "https://management.azure.com${AUTH_ID}?api-version=2022-03-01" \
+  --body @authsettings-updated.json \
+  --headers "Content-Type=application/json"
+
+az webapp restart \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP
 
 echo "✅ Easy Auth enabled"
+```
+
+Verify the Easy Auth settings:
+
+```bash
+az webapp auth-classic show \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP \
+  --query "{tokenStoreEnabled:tokenStoreEnabled,additionalLoginParams:additionalLoginParams,action:unauthenticatedClientAction}" \
+  --output json
+
+# Expected:
+# tokenStoreEnabled: true
+# additionalLoginParams: ["resource=https://ai.azure.com"]
+# action: RedirectToLoginPage
 ```
 
 ### 8-3. (Optional) Enable Easy Auth via Azure Portal
@@ -449,6 +541,8 @@ If you prefer the portal wizard:
 5. Enter **App (client) ID** and **Client Secret**
 6. Set **Unauthenticated requests** to **HTTP 302 Redirect: Recommended for websites**
 7. Click **Add**
+
+After using the portal wizard, still run the `authsettings` update from Step 8-2 to enable token store and set `resource=https://ai.azure.com`. The portal wizard does not expose all required settings for this hands-on.
 
 ## Step 9: Verify End-to-End Deployment
 
@@ -475,10 +569,27 @@ az webapp log tail \
 ```
 
 Look for:
+
+```text
+[backend] Starting FastAPI on 0.0.0.0:8000 ...
+Uvicorn running on http://0.0.0.0:8000
 ```
-[backend] Starting FastAPI on 127.0.0.1:8000 ...
-[frontend] Starting Next.js on port 8080 ...
-```
+
+### Verify User Isolation
+
+Test with two different Entra ID users:
+
+1. Open the web app with user A and ask **"Who am I?"**
+2. Complete the Foundry OAuth consent flow if prompted
+3. Open a private browser session with user B and ask **"Who am I?"**
+4. User B should either see a separate consent prompt or receive user B's Graph profile
+
+If user B receives user A's profile, verify:
+
+- App Service `REQUIRE_EASY_AUTH_USER_FOR_FOUNDRY=true`
+- Easy Auth token store is enabled
+- Easy Auth `additionalLoginParams` includes `resource=https://ai.azure.com`
+- Both users have a Foundry project role such as `Foundry User`
 
 ### Verify Environment Variables
 
@@ -525,7 +636,7 @@ echo "✅ Application Insights enabled"
 After successful deployment:
 
 | Component | URL/ID |
-|-----------|---------|
+| --------- | ------ |
 | Resource Group | `$RESOURCE_GROUP` |
 | Functions MCP | `https://${FUNCTION_APP}.azurewebsites.net` |
 | APIM Gateway | `https://${APIM_NAME}.azure-api.net` |
@@ -579,6 +690,75 @@ az webapp config appsettings list \
   --resource-group $RESOURCE_GROUP
 ```
 
+### Chat returns "Easy Auth user token was not forwarded"
+
+The backend did not receive `x-ms-token-aad-access-token` from Easy Auth. This usually means token store or the Azure AI resource login parameter is missing, or the user is still using an old Easy Auth session.
+
+Check Easy Auth settings:
+
+```bash
+az webapp auth-classic show \
+  --resource-group $RESOURCE_GROUP \
+  --name $WEB_APP \
+  --query "{tokenStoreEnabled:tokenStoreEnabled,additionalLoginParams:additionalLoginParams}" \
+  --output json
+```
+
+Expected:
+
+```json
+{
+  "tokenStoreEnabled": true,
+  "additionalLoginParams": [
+    "resource=https://ai.azure.com"
+  ]
+}
+```
+
+After changing Easy Auth settings, sign out and sign in again:
+
+```text
+https://${WEB_APP}.azurewebsites.net/.auth/logout
+```
+
+### Login callback fails with AADSTS650057 invalid resource
+
+This means the Easy Auth App Registration is requesting a token for `https://ai.azure.com`, but that resource is not listed in the app registration API permissions.
+
+Relevant values:
+
+| Field | Value |
+| ------ | ------ |
+| Resource | `https://ai.azure.com` |
+| Resource app ID | `18a66f5f-dbdf-4c17-9dd7-1634712a9cbe` |
+| Delegated permission | `user_impersonation` |
+
+Add the delegated permission to the Easy Auth app and grant admin consent. If `az ad` commands fail with `TokenCreatedWithOutdatedPolicies`, run `az logout` and sign in again with Graph scope:
+
+```bash
+az logout
+az login --tenant $TENANT_ID --scope https://graph.microsoft.com/.default
+```
+
+### Chat returns Foundry API HTTP 403
+
+The signed-in user can authenticate to App Service, but does not have access to the Foundry project. Grant the user a project role:
+
+```bash
+USER_OBJECT_ID=$(az ad user show \
+  --id user@example.com \
+  --query id \
+  --output tsv)
+
+az role assignment create \
+  --assignee-object-id $USER_OBJECT_ID \
+  --assignee-principal-type User \
+  --role "Foundry User" \
+  --scope $FOUNDRY_RESOURCE_ID
+```
+
+RBAC propagation can take a few minutes. Ask the user to sign out and sign in again after the assignment.
+
 ### APIM creation timeout
 
 - APIM creation can take up to 60 minutes
@@ -588,6 +768,7 @@ az webapp config appsettings list \
 ## CI/CD Setup (Optional)
 
 For automated deployments, see:
+
 - [GitHub Actions for Functions](https://learn.microsoft.com/azure/azure-functions/functions-how-to-github-actions)
 - [GitHub Actions for App Service](https://learn.microsoft.com/azure/app-service/deploy-github-actions)
 

@@ -34,17 +34,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
+import base64
+import asyncio
 
 import httpx
+import msal
 from azure.identity.aio import DefaultAzureCredential
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 logging.basicConfig(
@@ -124,8 +129,132 @@ app.add_middleware(
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth helper
 # ──────────────────────────────────────────────────────────────────────────────
-async def _get_token() -> str:
+def _get_easy_auth_claims(request: Request) -> dict[str, str]:
+    principal = request.headers.get("x-ms-client-principal")
+    if not principal:
+        return {}
+
+    try:
+        payload = base64.b64decode(principal).decode("utf-8")
+        data = json.loads(payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to parse Easy Auth principal header: %s", exc)
+        return {}
+
+    claims: dict[str, str] = {}
+    for claim in data.get("claims", []):
+        claim_type = claim.get("typ")
+        value = claim.get("val")
+        if isinstance(claim_type, str) and isinstance(value, str):
+            claims[claim_type] = value
+
+    if isinstance(data.get("user_id"), str):
+        claims["user_id"] = data["user_id"]
+    if isinstance(data.get("userDetails"), str):
+        claims["userDetails"] = data["userDetails"]
+    return claims
+
+
+def _get_easy_auth_user_key(request: Request) -> str:
+    claims = _get_easy_auth_claims(request)
+    for claim_name in (
+        "http://schemas.microsoft.com/identity/claims/objectidentifier",
+        "oid",
+        "user_id",
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier",
+        "preferred_username",
+        "userDetails",
+    ):
+        value = claims.get(claim_name)
+        if value:
+            return value
+    return "anonymous"
+
+
+def _conversation_key(request: Request, conversation_id: str) -> str:
+    return f"{_get_easy_auth_user_key(request)}:{conversation_id}"
+
+
+def _acquire_obo_token(user_assertion: str) -> dict[str, Any]:
+    tenant_id = os.environ.get("TENANT_ID", "").strip()
+    client_id = (
+        os.environ.get("WEBSITE_AUTH_CLIENT_ID", "").strip()
+        or os.environ.get("EASY_AUTH_CLIENT_ID", "").strip()
+    )
+    client_secret = (
+        os.environ.get("WEBSITE_AUTH_CLIENT_SECRET", "").strip()
+        or os.environ.get("EASY_AUTH_CLIENT_SECRET", "").strip()
+    )
+
+    if not tenant_id or not client_id or not client_secret:
+        return {
+            "error": "missing_configuration",
+            "error_description": (
+                "TENANT_ID and Easy Auth client credentials must be available "
+                "as app settings to acquire a user-delegated Foundry token."
+            ),
+        }
+
+    app = msal.ConfidentialClientApplication(
+        client_id=client_id,
+        client_credential=client_secret,
+        authority=f"https://login.microsoftonline.com/{tenant_id}",
+    )
+    return app.acquire_token_on_behalf_of(
+        user_assertion=user_assertion,
+        scopes=["https://ai.azure.com/.default"],
+    )
+
+
+def _decode_jwt_payload_unverified(token: str) -> dict[str, Any]:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload.encode("utf-8")))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+async def _get_token(request: Optional[Request] = None) -> str:
     """Acquire Azure access token for the Foundry scope (ai.azure.com)."""
+    if request is not None:
+        user_assertion = request.headers.get("x-ms-token-aad-access-token")
+        if user_assertion:
+            payload = _decode_jwt_payload_unverified(user_assertion)
+            audience = payload.get("aud")
+            if audience in ("https://ai.azure.com", "ai.azure.com"):
+                return user_assertion
+
+            result = await asyncio.to_thread(_acquire_obo_token, user_assertion)
+            access_token = result.get("access_token")
+            if access_token:
+                return access_token
+
+            logger.error(
+                "Failed to acquire user-delegated Foundry token via OBO: %s %s",
+                result.get("error"),
+                result.get("error_description"),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Failed to acquire a user-delegated Foundry token. "
+                    f"{result.get('error')}: {result.get('error_description')}"
+                ),
+            )
+
+        if os.environ.get("REQUIRE_EASY_AUTH_USER_FOR_FOUNDRY", "true").lower() == "true":
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Easy Auth user token was not forwarded to the backend. "
+                    "Enable App Service token store for Easy Auth."
+                ),
+            )
+
     credential = DefaultAzureCredential()
     try:
         token = await credential.get_token("https://ai.azure.com/.default")
@@ -145,6 +274,7 @@ async def _stream_response(
     previous_response_id: Optional[str],
     approval_inputs: Optional[list[dict[str, Any]]],
     conversation_id: str,
+    foundry_token: str,
 ) -> AsyncIterator[str]:
     """
     Call the Foundry Responses API with streaming and translate the raw SSE
@@ -158,7 +288,7 @@ async def _stream_response(
     require user-delegated OAuth consent.
     See: https://learn.microsoft.com/azure/ai-foundry/agents/how-to/mcp-authentication
     """
-    token = await _get_token()
+    token = foundry_token
 
     # ── Build request body ───────────────────────────────────────────────────
     body: dict = {
@@ -539,7 +669,7 @@ async def _stream_response(
 # ──────────────────────────────────────────────────────────────────────────────
 # Endpoints
 # ──────────────────────────────────────────────────────────────────────────────
-@app.get("/")
+@app.get("/api/health")
 async def health():
     return {
         "status": "ok",
@@ -549,7 +679,7 @@ async def health():
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     """
     Start a new conversation turn (or continue an existing one).
 
@@ -571,8 +701,10 @@ async def chat(req: ChatRequest):
             ),
         )
 
-    state = _conversations.get(req.conversationId, {})
+    conversation_key = _conversation_key(request, req.conversationId)
+    state = _conversations.get(conversation_key, {})
     previous_response_id = state.get("previous_response_id")
+    foundry_token = await _get_token(request)
 
     return StreamingResponse(
         _stream_response(
@@ -582,7 +714,8 @@ async def chat(req: ChatRequest):
             user_message=req.userMessage,
             previous_response_id=previous_response_id,
             approval_inputs=None,
-            conversation_id=req.conversationId,
+            conversation_id=conversation_key,
+            foundry_token=foundry_token,
         ),
         media_type="text/event-stream",
         headers={
@@ -594,7 +727,7 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/api/continue")
-async def continue_after_consent(req: ContinueRequest):
+async def continue_after_consent(req: ContinueRequest, request: Request):
     """
     Resume a paused conversation after the user has completed OAuth consent.
 
@@ -618,7 +751,8 @@ async def continue_after_consent(req: ContinueRequest):
             ),
         )
 
-    state = _conversations.get(req.conversationId)
+    conversation_key = _conversation_key(request, req.conversationId)
+    state = _conversations.get(conversation_key)
     if not state:
         raise HTTPException(
             status_code=404,
@@ -660,9 +794,10 @@ async def continue_after_consent(req: ContinueRequest):
 
     logger.info(
         "Continuing conversation %s with previous_response_id=%s",
-        req.conversationId,
+        conversation_key,
         previous_response_id,
     )
+    foundry_token = await _get_token(request)
 
     return StreamingResponse(
         _stream_response(
@@ -672,7 +807,8 @@ async def continue_after_consent(req: ContinueRequest):
             user_message=None,  # No new message; resume the paused run
             previous_response_id=previous_response_id,
             approval_inputs=approval_inputs,
-            conversation_id=req.conversationId,
+            conversation_id=conversation_key,
+            foundry_token=foundry_token,
         ),
         media_type="text/event-stream",
         headers={
@@ -681,3 +817,28 @@ async def continue_after_consent(req: ContinueRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+FRONTEND_OUT_DIR = Path(__file__).resolve().parents[1] / "frontend" / "out"
+if FRONTEND_OUT_DIR.exists():
+    next_static_dir = FRONTEND_OUT_DIR / "_next"
+    if next_static_dir.exists():
+        app.mount(
+            "/_next",
+            StaticFiles(directory=str(next_static_dir)),
+            name="next-static",
+        )
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def serve_frontend(full_path: str):
+    if FRONTEND_OUT_DIR.exists():
+        requested_file = FRONTEND_OUT_DIR / full_path
+        if full_path and requested_file.is_file():
+            return FileResponse(requested_file)
+
+        index_file = FRONTEND_OUT_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+
+    raise HTTPException(status_code=404, detail="Frontend assets not found.")
