@@ -2,7 +2,7 @@
 
 This guide provides step-by-step instructions for deploying all components of the Foundry Agent V2 × OAuth Identity Passthrough MCP hands-on project to Azure.
 
-The official front-end application is **`webapp-foundry-oauth`** (Next.js + FastAPI). It is deployed as a **single Linux App Service** with Easy Auth (Entra ID) enabled so that only authenticated users can access the app. The Next.js UI is built as a static export and served by the FastAPI backend from the same Python App Service. `webapp-copilotkit` and `foundry-agui-server` are kept in the repository for reference but are not the primary deployment target.
+The official front-end application is **`webapp-foundry-oauth`** (Next.js + FastAPI). It is deployed as a **single Linux App Service** with Easy Auth (Entra ID) enabled so that only authenticated users can access the app. The Next.js UI is built as a static export and served by the FastAPI backend from the same Python App Service.
 
 > **Important identity design**: The App Service backend must call Azure AI Foundry as the signed-in Easy Auth user, not as the App Service managed identity. Easy Auth must forward a user token to the backend, and each signed-in user must have a Foundry project role such as **Foundry User**. This keeps Foundry OAuth Identity Passthrough token caching aligned with the actual front-end user.
 
@@ -112,7 +112,7 @@ echo "✅ Function App created: $FUNCTION_APP"
 
 ### Deploy Function Code
 
-Use **`functions-mcp-selfhosted`** for the Foundry MCP tool endpoint. This implementation reads the user-delegated token from the HTTP `Authorization` header. Do not deploy `functions-mcp-server` for the OAuth Identity Passthrough path; that older implementation expects token arguments and will not match the Foundry authorization-header flow.
+Use **`functions-mcp-selfhosted`** for the Foundry MCP tool endpoint. This implementation reads the user-delegated token from the HTTP `Authorization` header.
 
 ```bash
 cd functions-mcp-selfhosted

@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide provides solutions to common issues you might encounter when setting up or running the CopilotKit × Foundry Agent V2 × OAuth Identity Passthrough MCP hands-on project.
+This guide provides solutions to common issues you might encounter when setting up or running the Foundry Agent V2 × OAuth Identity Passthrough MCP hands-on project.
 
 ## Table of Contents
 
@@ -302,7 +302,7 @@ az functionapp restart \
 
 **Solution**: Ensure requirements.txt is properly deployed
 ```bash
-cd functions-mcp-server
+cd functions-mcp-selfhosted
 
 # Install dependencies locally
 pip install -r requirements.txt
@@ -632,9 +632,11 @@ az webapp log tail \
 ```
 
 **Common issues**:
-1. **Missing node_modules**: Ensure dependencies are in deployment package
-2. **Wrong startup command**: Should be `npm start`
-3. **Port binding**: Next.js should listen on `PORT` env var
+
+1. **Wrong runtime**: The App Service should use a Python runtime.
+2. **Wrong startup command**: Should be `/bin/bash /home/site/wwwroot/startup.sh`.
+3. **Missing Python dependencies**: Check `backend/requirements.txt` is included in the deployment zip.
+4. **Missing static frontend export**: Ensure `frontend/out` is included in the deployment zip.
 
 **Solution**: Verify deployment
 ```bash
@@ -647,10 +649,10 @@ az webapp log deployment show \
 az webapp config set \
   --name <webapp-name> \
   --resource-group <resource-group> \
-  --startup-file "npm start"
+  --startup-file "/bin/bash /home/site/wwwroot/startup.sh"
 ```
 
-### CopilotKit UI not displaying
+### Web app UI not displaying
 
 **Symptoms**: Page loads but chat interface is missing
 
@@ -661,8 +663,8 @@ az webapp config set \
 
 **Solution**: Rebuild web app
 ```bash
-cd webapp-copilotkit
-rm -rf .next node_modules
+cd webapp-foundry-oauth/frontend
+rm -rf .next out node_modules
 npm install
 npm run build
 ```

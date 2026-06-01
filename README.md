@@ -4,8 +4,6 @@
 
 This repository contains a complete hands-on implementation of a chat application (**webapp-foundry-oauth**) using a custom **Next.js + FastAPI UI** connected to **Azure AI Foundry Agent V2 API** with **OAuth Identity Passthrough** to a **self-hosted MCP Server** running on Azure Functions.
 
-> **Note**: The `webapp-copilotkit` and `foundry-agui-server` directories are kept for reference, but the official front-end application is **`webapp-foundry-oauth`**.
-
 ## 🎯 Purpose
 
 Demonstrate the **official MCP design pattern** for authentication:
@@ -133,8 +131,6 @@ Demonstrate the **official MCP design pattern** for authentication:
   - MCP Approval Card (tool execution consent)
   - Tool execution log panel
 
-> `webapp-copilotkit/` and `foundry-agui-server/` are kept in the repository for reference but are not the primary deployment target.
-
 ### 2. Azure Functions MCP Server (functions-mcp-selfhosted/)
 - **Runtime**: Python 3.11+
 - **Framework**: FastMCP (HTTP + JSON-RPC)
@@ -205,8 +201,6 @@ Demonstrate the **official MCP design pattern** for authentication:
 
 - **[Functions MCP Server README](./functions-mcp-selfhosted/README.md)**
 - **[webapp-foundry-oauth README](./webapp-foundry-oauth/README.md)** ⭐ Official front-end
-- **[webapp-copilotkit README](./webapp-copilotkit/README.md)** (reference only)
-- **[Foundry AG-UI Server README](./foundry-agui-server/README.md)** (reference only)
 
 ## 🚀 Quick Start
 
@@ -768,7 +762,6 @@ See [LICENSE](./LICENSE) file.
 - [Azure AI Foundry](https://ai.azure.com) - Agent platform with OAuth Identity Passthrough
 - [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - Protocol specification
 - [FastMCP](https://github.com/modelcontextprotocol/python-sdk) - Python MCP implementation
-- [CopilotKit](https://copilotkit.ai/) - Chat UI framework (kept for reference in `webapp-copilotkit/`)
 
 ---
 
@@ -777,8 +770,6 @@ See [LICENSE](./LICENSE) file.
 # Foundry Agent (V2) × OAuth Identity Passthrough MCP - ハンズオン
 
 このリポジトリは、**webapp-foundry-oauth**（Next.js + FastAPI）を使用したチャットアプリケーションを **Azure AI Foundry Agent V2 API** に接続し、**OAuth Identity Passthrough** を介して Azure Functions 上で動作する **セルフホスト型 MCP Server** を呼び出す完全なハンズオン実装です。
-
-> **注意**: `webapp-copilotkit` と `foundry-agui-server` はリポジトリに残していますが、正式なフロントアプリは **`webapp-foundry-oauth`** です。
 
 ## 🎯 目的
 
@@ -833,8 +824,6 @@ See [LICENSE](./LICENSE) file.
 - **バックエンド**: SSE ストリーミング付き FastAPI（Python）
 - **認証**: アプリレベルのアクセス制御に Easy Auth（Entra ID）
 - **機能**: リアルタイム SSE チャット、OAuth 同意カード、MCP 承認カード、ツールログパネル
-
-> `webapp-copilotkit/` と `foundry-agui-server/` は参照用としてリポジトリに残しています。
 
 ### 2. Azure Functions MCP Server (functions-mcp-selfhosted/)
 - **ランタイム**: Python 3.11+

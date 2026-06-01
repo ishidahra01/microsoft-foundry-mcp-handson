@@ -2,7 +2,7 @@
 
 Foundry Agent + MCP OAuth Identity Passthrough の **Agent UI** 実装サンプルです。
 
-AG-UI / CopilotKit に依存せず、以下を実現します。
+このアプリ単体で、以下を実現します。
 
 | 機能 | 内容 |
 | ------ | ------ |
